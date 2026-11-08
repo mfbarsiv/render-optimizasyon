@@ -1,0 +1,2412 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Render Optimizasyon</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#23262b">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Düzen: tam ekran sonsuz board; üstte yüzen başlık çubuğu, altta yüzen araç çubuğu, sağda açılır ayar paneli */
+:root{
+  /* light board: warm light-grey canvas, cards a step darker, input fields lighter */
+  color-scheme:light;
+  --bg:#eceae6; --dot:#c6c2bb; --card:#e0ddd7; --card2:#f7f6f3; --line:#cdc9c2; --line2:#b3aea5;
+  --fg:#23262b; --muted:#5d6168; --dim:#86898f;
+  --hi:#23262b; --hi-ink:#ffffff; --sel:#3d6fe0;
+  --ok:#1f8a5b; --err:#c8372d; --ref:#a87a45;
+  --edit:#d8d5ce; --float:rgba(236,234,230,.94); --shadow:rgba(40,36,30,.14);
+  --f:"Geist", "Segoe UI", system-ui, sans-serif;
+  --mono:"Geist Mono", ui-monospace, Consolas, Menlo, monospace;
+}
+/* image overlays (painter, crop, lightbox) stay dark so the picture stands out */
+#lb,#crop,#paint{color-scheme:dark;--bg:#0d0e11;--card:#17191e;--card2:#1e2128;--line:#2a2e37;--line2:#3a3f4b;--fg:#e8eaef;--muted:#8c93a1;--dim:#5d6370;--hi:#f1f2f5;--hi-ink:#111318;--sel:#8fb4ff;--err:#ff7b72;color:var(--fg)}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg);font:13px/1.45 var(--f)}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--sel);outline-offset:1px}
+body.dragging,body.dragging *{user-select:none!important}
+
+/* ---------- viewport / world */
+#vp{position:fixed;inset:0;overflow:hidden;background-color:var(--bg);
+  background-image:radial-gradient(circle, var(--dot) 1.1px, transparent 1.4px)}
+#vp.pan, body.space #vp{cursor:grab}
+#vp.panning{cursor:grabbing}
+#world{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
+#wires{position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;pointer-events:none}
+.wire{fill:none;stroke-width:2;opacity:.85}
+.wire.sel{stroke-width:3.5;opacity:1}
+.rwire{fill:none;stroke-width:1.5;stroke-dasharray:4 5;opacity:.45}
+.wirehit{fill:none;stroke:transparent;stroke-width:16;pointer-events:stroke;cursor:pointer}
+.wiredel{pointer-events:all;cursor:pointer}
+.wiredel circle{fill:var(--card2);stroke:var(--err);stroke-width:1.5}
+.wiredel path{stroke:var(--err);stroke-width:1.8;stroke-linecap:round}
+#marq{position:fixed;border:1px solid var(--sel);background:rgba(143,180,255,.08);pointer-events:none;z-index:40}
+
+/* ---------- cards */
+.node{position:absolute;background:var(--card);border:1px solid var(--line);border-radius:12px;
+  box-shadow:0 8px 24px var(--shadow);cursor:default}
+.node.sel{border-color:var(--sel);box-shadow:0 0 0 1px var(--sel),0 8px 24px var(--shadow)}
+.nh{height:44px;display:flex;align-items:center;gap:8px;padding:0 8px 0 14px;border-bottom:1px solid var(--line);cursor:grab}
+.kind{font:500 10px/1 var(--mono);letter-spacing:.1em;color:var(--dim)}
+.nh input{flex:1;min-width:0;background:transparent;border:0;padding:4px 6px;margin-left:-6px;border-radius:5px;font-weight:500}
+.nh input:hover{background:var(--card2)}
+.nh input:focus{background:var(--card2);outline:none}
+.ib{width:26px;height:26px;display:grid;place-items:center;border:0;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;flex:none}
+.ib:hover{background:var(--card2);color:var(--fg)}
+.ib.del:hover{color:var(--err)}
+.ib svg{width:14px;height:14px}
+.nb{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.nf{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--line);flex-wrap:wrap}
+.nf .meta{flex:1;min-width:0;color:var(--muted);font-size:12px}
+.badge{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font:600 12px var(--mono);
+  background:var(--c);color:#fff;flex:none}
+.port{position:absolute;top:15px;width:14px;height:14px;border-radius:50%;background:var(--bg);border:2px solid var(--muted);cursor:crosshair;z-index:2;transition:transform .12s,border-color .12s}
+.port:hover,.port.hot{transform:scale(1.35);border-color:var(--fg)}
+.port.out{right:-8px}
+.port.in{left:-8px}
+.port.down{top:auto;bottom:-8px;left:calc(50% - 7px)}
+.port.top{top:-8px;left:calc(50% - 7px)}
+.nres .port.down,.nedit .port.top{border-color:var(--c)}
+.nimg .port.down{border-color:var(--fg)}
+/* input (girdi) card */
+.nimg{border:1.5px solid rgba(35,38,43,.45)}
+.nimg .kind{background:var(--fg);color:var(--bg);padding:4px 6px;border-radius:4px;font-weight:600}
+/* edit card */
+.nedit{background:var(--edit)}
+.nedit .kind{color:var(--c)}
+.etxt{width:100%;min-height:72px;resize:vertical;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:9px 10px;line-height:1.45}
+.etxt:focus{border-color:var(--line2);outline:none}
+.pprev{display:block;width:100%;border-radius:6px;cursor:pointer;background:var(--card2)}
+.pstate{font-size:11.5px;color:var(--muted)}
+.pbox{display:flex;flex-direction:column;gap:6px}
+.npr .port.out,.nref .port.out{border-color:var(--c)}
+.rz{position:absolute;right:1px;bottom:1px;width:16px;height:16px;cursor:nwse-resize;z-index:3;color:var(--dim);display:grid;place-items:center;border-radius:0 0 11px 0}
+.rz:hover{color:var(--fg)}
+.rz svg{width:12px;height:12px}
+.node.drop-ok{box-shadow:0 0 0 2px var(--ok),0 8px 24px var(--shadow)}
+
+.thumb{display:block;width:100%;background:var(--card2)}
+.nimg .nb{padding:10px 12px}
+.note,.ttl{background:var(--card2);border:1px solid var(--line);border-radius:7px;padding:7px 9px;width:100%}
+.dimtxt{font:400 11px var(--mono);color:var(--dim);white-space:nowrap}
+
+select.sel2{background:var(--card2);border:1px solid var(--line);border-radius:7px;padding:6px 8px}
+.txt{width:100%;min-height:150px;resize:vertical;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:10px;
+  font:12.5px/1.55 var(--mono);color:var(--fg)}
+.txt:focus,.note:focus,.idea:focus,select.sel2:focus{border-color:var(--line2);outline:none}
+.row{display:flex;gap:8px;align-items:center}
+.row.wrap{flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+.sm{border:1px solid var(--line);background:var(--card2);border-radius:7px;padding:6px 10px;cursor:pointer;font-size:12px;white-space:nowrap}
+.sm:hover{border-color:var(--line2)}
+.sm:disabled{opacity:.45;cursor:not-allowed}
+.go{border:0;background:var(--hi);color:var(--hi-ink);border-radius:8px;padding:7px 14px;font-weight:600;cursor:pointer;white-space:nowrap}
+.go:hover{filter:brightness(.92)}
+.go:disabled{opacity:.4;cursor:not-allowed}
+details.writer{border:1px dashed var(--line2);border-radius:8px;padding:8px 10px}
+details.writer summary{cursor:pointer;color:var(--muted);font-size:12px;list-style:none;display:flex;align-items:center;gap:6px}
+details.writer summary::-webkit-details-marker{display:none}
+details.writer summary::before{content:"+";font-family:var(--mono);color:var(--c)}
+details.writer[open] summary::before{content:"−"}
+details.writer[open] summary{margin-bottom:8px}
+.idea{width:100%;min-height:64px;resize:vertical;background:var(--card2);border:1px solid var(--line);border-radius:7px;padding:8px}
+.chk{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}
+
+.nres .rbody{position:relative;background:var(--card2)}
+.nres .rbody img{display:block;width:100%;cursor:zoom-in}
+.ph{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--muted);font-size:12px;padding:12px;text-align:center}
+.ph.err{color:var(--err);justify-content:flex-start;align-items:flex-start;text-align:left;overflow:auto;word-break:break-word}
+.spin{width:22px;height:22px;border:2px solid var(--line2);border-top-color:var(--c);border-radius:50%;animation:sp .9s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:3s}}
+.rt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.rt b{color:var(--fg);font-weight:500}
+
+/* ---------- floating UI */
+.float{position:fixed;z-index:30;background:var(--float);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px var(--shadow)}
+#top{top:12px;left:12px;display:flex;align-items:center;gap:6px;padding:6px 6px 6px 14px;max-width:calc(100vw - 24px)}
+.logo{font:700 14px var(--f);letter-spacing:-.01em;white-space:nowrap}
+.logo span{color:var(--muted);font-weight:500}
+.sep{width:1px;height:22px;background:var(--line);margin:0 6px;flex:none}
+#bname{background:transparent;border:0;padding:6px 8px;border-radius:7px;width:200px;min-width:80px}
+#bname:hover,#bname:focus{background:var(--card2);outline:none}
+#saveState{font:400 11px var(--mono);color:var(--dim);white-space:nowrap;padding:0 6px}
+.tb{border:0;background:transparent;color:var(--fg);padding:7px 10px;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:6px;white-space:nowrap}
+.tb:hover{background:var(--card2)}
+.tb svg{width:15px;height:15px}
+#right{top:12px;right:12px;display:flex;gap:6px;padding:6px}
+#bottom{bottom:14px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:2px;padding:6px}
+#zoomLbl{font:500 12px var(--mono);min-width:52px;text-align:center;color:var(--muted);cursor:pointer;border:0;background:transparent;padding:7px 4px;border-radius:8px}
+#zoomLbl:hover{background:var(--card2);color:var(--fg)}
+#queue{bottom:14px;left:12px;padding:8px 8px 8px 14px;display:flex;align-items:center;gap:10px}
+#queue .qt{font-size:12px;color:var(--muted)}
+#queue .qt b{color:var(--fg);font-weight:500;font-variant-numeric:tabular-nums}
+#keys{position:fixed;right:14px;bottom:16px;z-index:20;color:var(--dim);font:400 11px var(--mono);text-align:right;line-height:1.7;pointer-events:none}
+@media (max-width:1100px){#keys{display:none}}
+
+#empty{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:5}
+#empty .in{pointer-events:auto;text-align:center;max-width:420px;padding:28px 30px;border:1.5px dashed var(--line2);border-radius:16px;background:rgba(236,234,230,.7)}
+#empty h2{font:600 18px var(--f);margin:0 0 6px;text-wrap:balance}
+#empty p{color:var(--muted);margin:0 0 16px}
+#vp.fileover{box-shadow:inset 0 0 0 3px var(--sel)}
+
+/* drawers & popovers */
+.drawer{position:fixed;top:64px;right:12px;width:340px;max-width:calc(100vw - 24px);max-height:calc(100vh - 140px);overflow:auto;z-index:35;padding:16px;display:flex;flex-direction:column;gap:12px}
+.drawer h3{margin:0;font:600 14px var(--f)}
+.lbl{font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:-6px}
+.drawer input[type=text],.drawer input[type=password],.drawer select{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.hint{font-size:12px;color:var(--muted)}
+.hint a{color:var(--sel)}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.g2>div{display:flex;flex-direction:column;gap:10px}
+#boards{left:12px;right:auto;top:64px}
+.blist{display:flex;flex-direction:column;gap:4px}
+.bitem{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid transparent;cursor:pointer}
+.bitem:hover{background:var(--card2)}
+.bitem.cur{border-color:var(--line2)}
+.bitem .bn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bitem .bd{font:400 11px var(--mono);color:var(--dim);white-space:nowrap}
+.confirm{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--err)}
+
+/* option rows */
+.opts{display:flex;flex-direction:column;gap:4px}
+.orow{display:flex;align-items:center;gap:8px}
+.olbl{width:52px;flex:none;font:500 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.oset{display:flex;gap:2px;background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:2px;flex:none}
+.ob{width:30px;height:24px;display:grid;place-items:center;border:0;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;padding:0}
+.ob:hover{color:var(--fg);background:var(--line)}
+.ob.on{background:var(--c);color:#fff}
+.ob svg{width:15px;height:15px}
+.oval{flex:1;min-width:0;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ohint{font-size:11.5px;color:var(--muted);padding-left:60px}
+.orow.wrapr{align-items:flex-start}
+.orow.wrapr .olbl{padding-top:6px}
+.chips{display:flex;flex-wrap:wrap;gap:4px;flex:1;min-width:0}
+.chip{padding:4px 9px;border-radius:999px;border:1px solid var(--line);background:var(--card2);font-size:12px;line-height:1.3;cursor:pointer;color:var(--muted)}
+.chip:hover{color:var(--fg);border-color:var(--line2)}
+.chip.on{background:var(--c);color:#fff;border-color:transparent}
+.surfbox{display:flex;flex-direction:column;gap:6px}
+.surfctx{font-size:11.5px;color:var(--muted)}
+.ib.lock.on{color:var(--c)}
+.fullp{margin:0;white-space:pre-wrap;word-break:break-word;font:11px/1.5 var(--mono);color:var(--muted);max-height:240px;overflow:auto}
+.nref .thumb{cursor:pointer}
+/* variation popover */
+#varpop{z-index:45;padding:8px;display:grid;grid-template-columns:repeat(3,1fr);gap:2px;width:300px}
+.vtitle{grid-column:1/-1;font-size:12px;color:var(--muted);padding:4px 6px 6px}
+.vb{display:flex;flex-direction:column;align-items:center;gap:5px;padding:9px 4px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--fg);cursor:pointer;font-size:12px}
+.vb:hover{background:var(--card2);border-color:var(--line)}
+.vb svg{width:18px;height:18px;color:var(--muted)}
+.vb.wide{grid-column:1/-1;flex-direction:row;justify-content:center;border-color:var(--line);margin-top:4px}
+.vb.wide + .vb.wide{margin-top:0}
+/* crop */
+#paint{position:fixed;inset:0;z-index:70;background:rgba(8,9,11,.96);display:flex;flex-direction:column}
+#paint .cbar{display:flex;gap:6px;align-items:center;padding:10px 16px;flex-wrap:wrap}
+#paint .seg{display:flex;gap:2px;background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:2px}
+#paint .seg .tb.on{background:var(--hi);color:var(--hi-ink)}
+#paint .sw{display:flex;gap:4px;padding:0 6px}
+#paint .sw button{width:22px;height:22px;border-radius:50%;border:2px solid var(--line2);cursor:pointer;padding:0}
+#paint .sw button.on{border-color:var(--hi);transform:scale(1.15)}
+#paint .phint{padding:0 16px 8px;font-size:12px;color:var(--muted)}
+#paint .cstage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:0 24px 24px;overflow:hidden;touch-action:none;cursor:crosshair;user-select:none}
+#paint .cstage.pan{cursor:grab}
+#paint .cstage.panning{cursor:grabbing}
+#paint .pwrap{position:relative;line-height:0;transform-origin:0 0;will-change:transform}
+#paint .pwrap img{max-width:calc(100vw - 48px);max-height:calc(100vh - 130px);display:block;pointer-events:none}
+#paint canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#pMask{opacity:.5}
+#crop{position:fixed;inset:0;z-index:70;background:rgba(8,9,11,.95);display:flex;flex-direction:column}
+#crop .cbar{display:flex;gap:8px;align-items:center;padding:12px 16px;flex-wrap:wrap}
+#crop .cstage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:0 24px 24px}
+#crop .cwrap{position:relative;user-select:none;touch-action:none;cursor:crosshair;line-height:0}
+#crop img{max-width:calc(100vw - 48px);max-height:calc(100vh - 110px);display:block;pointer-events:none}
+#crop .cbox{position:absolute;border:2px solid var(--hi);box-shadow:0 0 0 9999px rgba(0,0,0,.55);pointer-events:none}
+
+/* collapsible sections on cards */
+.osec{border:1px solid var(--line);border-radius:8px;background:var(--card2)}
+.osec>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;font-size:12.5px;font-weight:500}
+.osec>summary::-webkit-details-marker{display:none}
+.osec>summary::before{content:"▸";color:var(--c);font-size:11px;transition:transform .15s}
+.osec[open]>summary::before{transform:rotate(90deg)}
+.osec .ss{flex:1;min-width:0;text-align:right;color:var(--muted);font-weight:400;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.osec .ss.on{color:var(--c)}
+.osec .sb{padding:2px 10px 10px;display:flex;flex-direction:column;gap:6px}
+.osec .oset{background:var(--card)}
+.osec .chip{background:var(--card)}
+.osec .chip.on{background:var(--c)}
+.secs{display:flex;flex-direction:column;gap:6px}
+.qhint{font-size:11.5px;color:var(--muted)}
+.qsub{font:500 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-top:2px}
+
+#lb{position:fixed;inset:0;z-index:60;background:rgba(8,9,11,.94);display:flex;flex-direction:column}
+#lb .lbtop{display:flex;align-items:center;gap:10px;padding:12px 16px;padding-top:calc(12px + env(safe-area-inset-top,0px))}
+#lb .lbtitle{flex:1;min-width:0;display:flex;align-items:center;gap:10px;overflow:hidden}
+#lb .lbtitle span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#lb .lbimg{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:0 64px 24px;position:relative}
+#lb .lbimg img{max-width:100%;max-height:100%;border-radius:6px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+#lb .nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid var(--line2);background:var(--card);cursor:pointer;display:grid;place-items:center}
+#lb .nav:hover{border-color:var(--fg)}
+#lb .nav.l{left:12px} #lb .nav.r{right:12px}
+#lb .tb.on{background:var(--hi);color:var(--hi-ink)}
+.toast{position:fixed;top:68px;left:50%;transform:translateX(-50%);background:var(--hi);color:var(--hi-ink);padding:8px 14px;border-radius:8px;font-size:13px;z-index:80;max-width:min(560px,calc(100vw - 32px));box-shadow:0 8px 24px var(--shadow)}
+</style>
+</head>
+<body>
+
+<div id="vp">
+  <div id="world"><svg id="wires"></svg></div>
+</div>
+<div id="marq" hidden></div>
+
+<div id="empty"><div class="in">
+  <h2>Ekran görüntülerini board'a sürükle</h2>
+  <p>ya da Ctrl+V ile yapıştır. Ana prompt kartını girdi görsellerine bağla, Renderla'ya bas. Çıkan render'ın altındaki noktadan ya da "Devam et" ile düzenlemeye devam et.</p>
+  <button class="go" id="emptyPick" type="button">Görsel seç</button>
+</div></div>
+
+<!-- top bar -->
+<div class="float" id="top">
+  <div class="logo">Render <span>Optimizasyon</span></div>
+  <div class="sep"></div>
+  <input id="bname" type="text" aria-label="Board adı">
+  <button class="tb" id="boardsBtn" type="button" title="Boardlar">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>Boardlar</button>
+  <span id="saveState">—</span>
+</div>
+<div class="float" id="right">
+  <button class="tb" id="setBtn" type="button">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>Ayarlar</button>
+  <button class="go" id="runAll" type="button">Tümünü renderla</button>
+</div>
+
+<!-- bottom toolbar -->
+<div class="float" id="bottom">
+  <button class="tb" id="addPrompt" type="button" title="Yeni prompt kartı (P)">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M5 6h6M5 9h4"/></svg>Prompt</button>
+  <button class="tb" id="addImg" type="button" title="Görsel ekle (I)">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2.5" width="12" height="11" rx="2"/><circle cx="6" cy="6.5" r="1.3"/><path d="M2.5 12l3.5-3.5 3 3 2-2 2.5 2.5"/></svg>Görsel</button>
+  <button class="tb" id="addRef" type="button" title="Malzeme referansı ekle (R)">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M2 6.5h12M2 10.5h12M6.5 2v12M10.5 2v12"/></svg>Referans</button>
+  <div class="sep"></div>
+  <button class="tb" id="zOut" type="button" title="Uzaklaştır">−</button>
+  <button id="zoomLbl" type="button" title="%100'e dön">100%</button>
+  <button class="tb" id="zIn" type="button" title="Yakınlaştır">+</button>
+  <button class="tb" id="fit" type="button" title="Tümünü sığdır (Shift+1)">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg>Sığdır</button>
+  <div class="sep"></div>
+  <button class="tb" id="tidy" type="button" title="Her görselin renderlarını A, B, C sırasıyla yan yana diz">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1.5" y="4" width="3.5" height="8" rx="1"/><rect x="6.25" y="4" width="3.5" height="8" rx="1"/><rect x="11" y="4" width="3.5" height="8" rx="1"/></svg>Hizala</button>
+</div>
+
+<div class="float" id="queue" hidden>
+  <div class="spin" style="--c:var(--fg);width:16px;height:16px"></div>
+  <span class="qt" id="qText"></span>
+  <button class="sm" id="stopBtn" type="button">Durdur</button>
+</div>
+
+<div id="keys">Sürükle / boşluk / orta tuş: gez · Tekerlek: yakınlaştır<br>Shift+sürükle: çoklu seç · Del: sil · Ctrl+S: kaydet<br>P: prompt · I: görsel · R: referans · Köşeden çek: boyutlandır<br>Render'ın altındaki nokta: düzenleme dalı aç</div>
+
+<!-- settings -->
+<div class="float drawer" id="settings" hidden>
+  <div class="row"><h3 class="grow">Ayarlar</h3><button class="ib" data-close="settings" type="button" aria-label="Kapat"><svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
+  <div class="lbl">Render servisi</div>
+  <select id="provider"><option value="openai">OpenAI (GPT Image)</option><option value="gemini">Google Gemini</option></select>
+
+  <div id="oaBox" style="display:flex;flex-direction:column;gap:12px">
+    <div class="lbl">OpenAI API anahtarı</div>
+    <div class="row"><input type="password" id="oaKey" placeholder="sk-…" autocomplete="off" class="grow"><button class="sm" data-toggle="oaKey" type="button">Göster</button></div>
+    <div class="row"><button class="sm" id="oaTest" type="button">Anahtarı test et</button><span class="hint grow" id="oaTestOut"></span></div>
+    <div class="hint">Yalnızca bu tarayıcıda saklanır. <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">Anahtarlar</a> · <a href="https://platform.openai.com/settings/organization/billing" target="_blank" rel="noopener">Bakiye</a></div>
+    <div class="lbl">Görsel modeli</div>
+    <select id="oaModel">
+      <option value="gpt-image-2.5-sunburst">gpt-image-2.5-sunburst (en hassas düzenleme)</option>
+      <option value="gpt-image-2.5-flare">gpt-image-2.5-flare (hızlı)</option>
+      <option value="gpt-image-2">gpt-image-2</option>
+      <option value="gpt-image-1.5">gpt-image-1.5</option>
+      <option value="gpt-image-1-mini">gpt-image-1-mini (ucuz)</option>
+      <option value="custom">Diğer…</option>
+    </select>
+    <input type="text" id="oaCustom" placeholder="model adı" hidden>
+    <div class="g2">
+      <div><div class="lbl">Kalite</div>
+        <select id="oaQuality"><option value="auto">Otomatik</option><option value="low">Düşük (taslak)</option><option value="medium">Orta</option><option value="high" selected>Yüksek</option><option value="xhigh">Çok yüksek (2.5)</option><option value="max">Maksimum (2.5)</option></select></div>
+      <div><div class="lbl">Çıktı çözünürlüğü</div>
+        <select id="oaRes"><option value="1024">~1K</option><option value="1536" selected>~1.5K</option><option value="2048">~2K</option><option value="2560">~2.5K</option><option value="3840">4K (deneysel)</option></select></div>
+    </div>
+    <div class="hint">GPT Image modelleri için OpenAI hesabında kurum doğrulaması (Organization Verification) gerekebilir. Kalite ve çözünürlük arttıkça render pahalılaşır.</div>
+  </div>
+
+  <div id="gmBox" style="display:flex;flex-direction:column;gap:12px">
+    <div class="lbl">Gemini API anahtarı</div>
+    <div class="row"><input type="password" id="apiKey" placeholder="AIza…" autocomplete="off" class="grow"><button class="sm" data-toggle="apiKey" type="button">Göster</button></div>
+    <div class="hint"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">AI Studio'dan anahtar al</a>. Görüntü modelleri faturalandırma ister.</div>
+    <div class="lbl">Gemini görsel modeli</div>
+    <select id="model">
+      <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (Nano Banana)</option>
+      <option value="gemini-3.1-flash-image">gemini-3.1-flash-image</option>
+      <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (yüksek kalite)</option>
+      <option value="custom">Diğer…</option>
+    </select>
+    <input type="text" id="customModel" placeholder="model adı" hidden>
+  </div>
+
+  <div class="g2">
+    <div><div class="lbl">En-boy oranı</div>
+      <select id="aspect"><option value="">Kaynakla aynı</option><option>16:9</option><option>3:2</option><option>4:3</option><option>1:1</option><option>3:4</option><option>2:3</option><option>9:16</option><option>21:9</option></select></div>
+    <div><div class="lbl">Paralel istek</div>
+      <select id="conc"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
+    <div><div class="lbl">Gönderim boyutu</div>
+      <select id="maxSide"><option value="1536">1536 px</option><option value="2048" selected>2048 px</option><option value="3072">3072 px</option></select></div>
+  </div>
+
+  <div class="lbl">Prompt yazdırma</div>
+  <select id="textProvider"><option value="openai">OpenAI</option><option value="gemini">Gemini (ücretsiz katman)</option></select>
+  <div class="g2">
+    <div><div class="lbl">OpenAI metin modeli</div><input type="text" id="oaTextModel" value="gpt-5.4-mini"></div>
+    <div><div class="lbl">Gemini metin modeli</div><input type="text" id="textModel" value="gemini-2.5-flash"></div>
+  </div>
+</div>
+
+<!-- boards -->
+<div class="float drawer" id="boards" hidden>
+  <div class="row"><h3 class="grow">Boardlar</h3><button class="ib" data-close="boards" type="button" aria-label="Kapat"><svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
+  <div class="blist" id="blist"></div>
+  <div class="row wrap">
+    <button class="go" id="newBoard" type="button">Yeni board</button>
+    <button class="sm" id="exportBtn" type="button">Dışa aktar (.json)</button>
+    <button class="sm" id="importBtn" type="button">İçe aktar</button>
+  </div>
+  <div class="hint">Board her değişiklikte bu tarayıcıya otomatik kaydedilir. Başka bilgisayara taşımak ya da yedeklemek için dışa aktar.</div>
+</div>
+
+<div id="lb" hidden>
+  <div class="lbtop">
+    <div class="lbtitle"><span class="badge" id="lbBadge">A</span><span id="lbTitle"></span></div>
+    <button class="tb" id="lbSrc" type="button" title="Kaynak görselle karşılaştır (K)">Kaynak</button>
+    <button class="tb" id="lbDl" type="button">İndir</button>
+    <button class="tb" id="lbClose" type="button">Kapat</button>
+  </div>
+  <div class="lbimg">
+    <button class="nav l" id="lbPrev" type="button" aria-label="Önceki">‹</button>
+    <img id="lbImg" alt="">
+    <button class="nav r" id="lbNext" type="button" aria-label="Sonraki">›</button>
+  </div>
+</div>
+
+<div class="float" id="varpop" hidden></div>
+
+<div id="paint" hidden>
+  <div class="cbar">
+    <div class="seg" id="pTools">
+      <button class="tb on" data-tool="mask" type="button" title="Değişecek alanı boya">Fırça</button>
+      <button class="tb" data-tool="sketch" type="button" title="Eklemek istediğini kabaca çiz">Eskiz</button>
+      <button class="tb" data-tool="wand" type="button" title="Benzer renkli alanı tek dokunuşla seç (W)">Değnek</button>
+      <button class="tb" data-tool="erase" type="button" title="Boya ve eskizi sil">Silgi</button>
+      <button class="tb" data-tool="pan" type="button" title="Görseli kaydır (ya da Boşluk tuşunu basılı tut)">Kaydır</button>
+    </div>
+    <div class="seg">
+      <button class="tb" id="pZOut" type="button" title="Uzaklaştır (−)">−</button>
+      <button class="tb" id="pZLbl" type="button" title="Ekrana sığdır (0)" style="min-width:56px;justify-content:center">100%</button>
+      <button class="tb" id="pZIn" type="button" title="Yakınlaştır (+)">+</button>
+    </div>
+    <div class="sw" id="pSw">
+      <button type="button" data-c="#ffffff" style="background:#ffffff" class="on" aria-label="Beyaz"></button>
+      <button type="button" data-c="#ffd400" style="background:#ffd400" aria-label="Sarı"></button>
+      <button type="button" data-c="#2dd4ff" style="background:#2dd4ff" aria-label="Mavi"></button>
+      <button type="button" data-c="#111111" style="background:#111111" aria-label="Siyah"></button>
+    </div>
+    <div class="row" id="pWandOpts" style="gap:8px" hidden>
+      <div class="seg"><button class="tb on" id="pWAdd" type="button" title="Seçime ekle (Shift)">Ekle</button><button class="tb" id="pWSub" type="button" title="Seçimden çıkar (Alt)">Çıkar</button></div>
+      <label class="hint row" style="gap:6px">Tolerans <input type="range" id="pTol" min="0" max="100" value="32"><span id="pTolV" style="min-width:22px">32</span></label>
+      <label class="hint row" style="gap:5px"><input type="checkbox" id="pContig" checked> Bitişik</label>
+    </div>
+    <button class="sm" id="pUndo" type="button" title="Geri al (Ctrl+Z)">Geri al</button>
+    <label class="hint row" style="gap:6px" id="pSizeL">Boyut <input type="range" id="pSize" min="4" max="160" value="40"></label>
+    <button class="sm" id="pClear" type="button">Temizle</button>
+    <span class="grow"></span>
+    <button class="sm" id="pCancel" type="button">Vazgeç</button><button class="go" id="pOk" type="button">Uygula</button>
+  </div>
+  <div class="phint" id="pHint"></div>
+  <div class="cstage" id="pStage"><div class="pwrap" id="pWrap"><img id="pImg" alt=""><canvas id="pMask"></canvas><canvas id="pSk"></canvas></div></div>
+</div>
+
+<div id="crop" hidden>
+  <div class="cbar"><b class="grow">Malzeme alanını seç</b><span class="hint">Görsel üzerinde sürükleyerek dikdörtgen çiz · Enter: uygula · Esc: vazgeç</span>
+    <button class="sm" id="cropAll" type="button">Tümünü kullan</button><button class="sm" id="cropCancel" type="button">Vazgeç</button><button class="go" id="cropOk" type="button">Uygula</button></div>
+  <div class="cstage"><div class="cwrap" id="cropWrap"><img id="cropImg" alt=""><div class="cbox" id="cropBox" hidden></div></div></div>
+</div>
+
+<input type="file" id="fileIn" accept="image/*" multiple hidden>
+<input type="file" id="refIn" accept="image/*" multiple hidden>
+<input type="file" id="importIn" accept=".json,application/json" hidden>
+
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+const vp = $('#vp'), world = $('#world'), svg = $('#wires');
+
+/* ================= constants ================= */
+const COLORS = ['#3d6fe0','#d9822b','#2f9e72','#c8559e','#a88d16','#7a5ce0','#2a97ab','#d9584a'];
+const PORT_Y = 22, IMG_W = 280, PR_W = 340, RES_W = 300;
+const TEMPLATES = {
+  facade: `Turn this 3D model screenshot / sketch into a photorealistic architectural exterior photograph.
+Materials: render the facade materials realistically with correct scale, texture and subtle weathering; clear glass with realistic reflections.
+Context: realistic sidewalk, street trees and landscaping, natural sky, believable surroundings.
+Quality: sharp detail, accurate colors, true-to-life materials. No text, no watermark, no frames.`,
+  interior: `Turn this 3D model screenshot / sketch into a photorealistic interior photograph.
+Materials: realistic textures on floors, walls and furniture with correct scale; subtle imperfections.
+Light: natural light from the windows with soft bounce light and realistic shadows.
+Quality: interior design magazine photography, balanced exposure, true-to-life colors. No text, no watermark.`,
+  furniture: `Turn this 3D model screenshot / sketch into a photorealistic product photograph of the furniture piece.
+Materials: realistic wood grain, fabric weave, metal and finish quality with correct scale.
+Quality: high-end furniture catalogue photography, sharp focus, accurate colors. No text, no watermark.`
+};
+const EDIT_BASE = `Use image 1 (an existing render) as the base and edit it. Keep everything that is not mentioned below exactly the same: the design, materials, colors, composition and all details.`;
+const CAT_NAME = { facade:'Cephe', interior:'İç mekân', furniture:'Mobilya' };
+const CAT_EN = { facade:'architectural exterior / facade', interior:'interior space', furniture:'furniture product' };
+const ICON = {
+  x:'<svg viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.8"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+  dup:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5"/></svg>',
+  rz:'<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M10.5 4.5l-6 6M10.5 8l-2.5 2.5"/></svg>',
+  lock:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7.5" rx="1.5"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.6 0v2"/></svg>',
+  unlock:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7.5" rx="1.5"/><path d="M5.2 7V5a2.8 2.8 0 0 1 5.5-.8"/></svg>',
+  zoom:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg>',
+  dl:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5v8M4.5 7.5L8 11l3.5-3.5M2.5 13.5h11"/></svg>',
+  pen:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M10.8 2.7l2.5 2.5L5.5 13H3v-2.5z"/><path d="M9.3 4.2l2.5 2.5"/></svg>'
+};
+const ic = d => `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const IC = {
+  sun: ic('<circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/>'),
+  sunset: ic('<path d="M4.5 11a3.5 3.5 0 0 1 7 0"/><path d="M1.5 11h13M3.5 13.5h9M8 3v2.5M3.2 6.2l1.4 1.2M12.8 6.2l-1.4 1.2"/>'),
+  blue: ic('<path d="M10.2 2.8a4.2 4.2 0 1 0 3.2 6.6 3.4 3.4 0 0 1-3.2-6.6z"/><path d="M1.5 13.5h13"/>'),
+  night: ic('<path d="M11 2.6a5.3 5.3 0 1 0 2.8 9.1 4.4 4.4 0 0 1-2.8-9.1z"/><path d="M3.5 2.5v2M2.5 3.5h2"/>'),
+  summer: ic('<circle cx="8" cy="6.5" r="4"/><path d="M8 10.5v4M6 14.5h4"/>'),
+  spring: ic('<path d="M8 14.5V8"/><path d="M8 8c0-3 2-4.5 5-4.5 0 3-2 4.5-5 4.5z"/><path d="M8 10.5c0-2.2-1.5-3.5-4.5-3.5 0 2.3 1.5 3.5 4.5 3.5z"/>'),
+  autumn: ic('<path d="M3 13c0-6 4-10 10.5-10.5C13 9 9 13 3 13z"/><path d="M3 13l6-6"/>'),
+  winter: ic('<path d="M8 1.5v13M2.4 4.75l11.2 6.5M2.4 11.25l11.2-6.5"/><path d="M6.3 2.8L8 4.3l1.7-1.5M6.3 13.2L8 11.7l1.7 1.5"/>'),
+  partly: ic('<circle cx="6" cy="6" r="2.4"/><path d="M6 1.6v1M1.6 6h1M2.9 2.9l.7.7M9.1 2.9l-.7.7"/><path d="M5.5 13.5h6a2.5 2.5 0 0 0 .3-5 3.3 3.3 0 0 0-6.3.9 2.1 2.1 0 0 0 0 4.1z"/>'),
+  overcast: ic('<path d="M4.5 12.5h7.5a3 3 0 0 0 .4-6 4 4 0 0 0-7.7 1.1 2.5 2.5 0 0 0-.2 4.9z"/>'),
+  rain: ic('<path d="M4.5 9.5h7.5a2.8 2.8 0 0 0 .4-5.6 3.8 3.8 0 0 0-7.4 1 2.3 2.3 0 0 0-.5 4.6z"/><path d="M5.5 11.5l-.8 2M8.5 11.5l-.8 2M11.5 11.5l-.8 2"/>'),
+  fog: ic('<path d="M5 3.5h7M2 6.5h12M3.5 9.5h10M2 12.5h9"/>'),
+  calm: ic('<path d="M1.5 12.5h13"/><path d="M11.5 12.5v-3.8"/><circle cx="11.5" cy="6.5" r="2.2"/><path d="M3 12.5v-2h4v2"/>'),
+  people: ic('<circle cx="5.5" cy="4.5" r="1.8"/><path d="M2.5 13.5V11a3 3 0 0 1 6 0v2.5"/><circle cx="11" cy="5.5" r="1.5"/><path d="M9.6 9.2a2.5 2.5 0 0 1 3.9 2v2.3"/>'),
+  detail: ic('<circle cx="7" cy="7" r="4.5"/><path d="M10.4 10.4L14 14M5 7h4M7 5v4"/>'),
+  angle: ic('<path d="M3 5.5h2l1-1.5h4l1 1.5h2v7H3z"/><circle cx="8" cy="8.8" r="2"/>'),
+  real: ic('<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2.5 11.5L6 8l2.5 2.5 2-2 3 3"/><circle cx="10.5" cy="6" r="1"/>'),
+  maket: ic('<path d="M8 1.8l5.5 3v6.4L8 14.2l-5.5-3V4.8z"/><path d="M2.5 4.8L8 7.8l5.5-3M8 7.8v6.4"/>'),
+  water: ic('<path d="M13.5 2.5L7.2 8.8"/><path d="M7 9c-2 0-3 1.2-3 2.6 0 1-.8 1.6-1.5 1.9 2.5.6 5.5-.3 5.5-2.5z"/>'),
+  white: ic('<rect x="2.5" y="7" width="5" height="7"/><rect x="7.5" y="2.5" width="6" height="11.5"/>')
+};
+// [value, Turkish label, icon, English sentence]
+const OPTS = [
+  { k:'space', lbl:'Mekân', showFor:['interior'], chips:true, items:[
+    ['living','Salon',null,'Space: a residential living room.'],
+    ['kitchen','Mutfak',null,'Space: a residential kitchen.'],
+    ['bedroom','Yatak odası',null,'Space: a bedroom.'],
+    ['bath','Banyo',null,'Space: a bathroom.'],
+    ['office','Ofis',null,'Space: an office workspace.'],
+    ['cafe','Kafe / restoran',null,'Space: a café / restaurant interior.'],
+    ['retail','Mağaza',null,'Space: a retail store interior.'],
+    ['lobby','Lobi',null,'Space: a lobby / reception hall.'] ]},
+  { k:'time', lbl:'Zaman', items:[
+    ['day','Gündüz',IC.sun,'Time of day: daytime with natural daylight.'],
+    ['sunset','Gün batımı',IC.sunset,'Time of day: golden-hour sunset, warm low sun, long soft shadows.'],
+    ['blue','Mavi saat',IC.blue,'Time of day: blue hour just after sunset, deep blue sky, interior and exterior lights switched on, warm glow from the windows.'],
+    ['night','Gece',IC.night,'Time of day: night, dark sky, realistic artificial lighting from fixtures and windows, soft pools of light on the ground.'] ]},
+  { k:'season', lbl:'Mevsim', hideFor:['furniture'], items:[
+    ['summer','Yaz',IC.summer,'Season: summer, lush green vegetation.'],
+    ['spring','İlkbahar',IC.spring,'Season: spring, fresh light-green foliage and some blossoming trees.'],
+    ['autumn','Sonbahar',IC.autumn,'Season: autumn, orange, red and yellow foliage, some fallen leaves on the ground.'],
+    ['winter','Kış',IC.winter,'Season: winter, snow on the ground and on horizontal surfaces, bare trees, cold crisp light.'] ]},
+  { k:'weather', lbl:'Hava', hideFor:['furniture'], items:[
+    ['partly','Parçalı bulutlu',IC.partly,'Weather: partly cloudy sky with soft natural light.'],
+    ['clear','Açık, güneşli',IC.sun,'Weather: clear sunny sky, crisp shadows.'],
+    ['overcast','Kapalı',IC.overcast,'Weather: overcast sky, soft diffuse light, no hard shadows.'],
+    ['rain','Yağmurlu',IC.rain,'Weather: rainy, wet reflective ground surfaces, puddles, moody light.'],
+    ['fog','Sisli',IC.fog,'Weather: light fog and mist, atmospheric depth, soft muted light.'] ]},
+  { k:'flight', lbl:'Işık', showFor:['furniture'], items:[
+    ['soft','Yumuşak stüdyo',IC.partly,'Lighting: soft, even studio light with gentle shadows.'],
+    ['window','Gün ışığı (pencere)',IC.sun,'Lighting: natural daylight from a large side window, soft directional shadows.'],
+    ['spot','Dramatik tek spot',IC.night,'Lighting: a single dramatic spotlight, the piece emerging from a darker background.'],
+    ['hard','Sert gölgeli',IC.sunset,'Lighting: hard direct light with crisp, graphic shadows.'] ]},
+  { k:'shot', lbl:'Çekim', items:[
+    ['calm','Boş, sakin',IC.calm,'Scene: calm and quiet, no people or only a few distant people, no cars in the foreground.'],
+    ['people','İnsanlı, canlı',IC.people,'Scene: lively, with people at correct scale using the space naturally, everyday life.'],
+    ['detail','Detay yakın çekim',IC.detail,'Shot: a close-up detail shot of the same design focusing on materials, joints and construction details.'],
+    ['angle','Farklı açı',IC.angle,'Shot: show the same design from a different, natural eye-level viewpoint.'] ]},
+  { k:'style', lbl:'Stil', items:[
+    ['real','Gerçekçi',IC.real,'Style: photorealistic, high-end architectural photography.'],
+    ['maket','Maket fotoğrafı',IC.maket,'Style: a photograph of a physical architectural scale model (wood, cardboard and acrylic) on a table, shallow depth of field, studio light.'],
+    ['water','Suluboya',IC.water,'Style: hand-painted watercolor architectural presentation illustration, loose brush strokes, white paper.'],
+    ['white','Beyaz maket',IC.white,'Style: all-white cardboard massing model look, monochrome white surfaces, soft shadows, no colors or textures.'] ]}
+];
+const DEF_OPTS = { flight:'soft', space:'living', arch:'none', bg:'white', add:[], cam:[], time:'day', season:'summer', weather:'partly', shot:'calm', style:'real' };
+const optVisible = (g, cat) => g.showFor ? g.showFor.includes(cat) : !(g.hideFor||[]).includes(cat);
+const CAMERA_FREE = new Set(['detail','angle']);
+const LOCK_FULL = `IMPORTANT, composition lock: use image 1 as the exact base. Do not change the camera position, viewing angle, focal length, perspective or framing. Keep every line, edge, opening, proportion and the full geometry of image 1 exactly as drawn. Do not add, remove or move any architectural or design elements.`;
+const LOCK_DESIGN = `IMPORTANT, design lock: the design shown in image 1 (its geometry, proportions, openings and materials) must stay identical. Only the camera framing changes as described above.`;
+// reference surfaces: [key, Turkish label, English target]
+const SF = {
+  facade:['facade','Cephe kaplaması','the facade cladding surfaces'], glazing:['glazing','Doğrama ve cam','the window and door frames and glazing'],
+  paving:['paving','Dış zemin','the outdoor ground paving'], roof:['roof','Çatı','the roof surfaces'], landscape:['landscape','Peyzaj ve bitki','the landscaping and planting'],
+  floor:['floor','Zemin','the floor'], wall:['wall','Duvar','the walls'], ceiling:['ceiling','Tavan','the ceiling'],
+  counter:['counter','Tezgah','the kitchen countertop'], cabinets:['cabinets','Dolaplar','the kitchen cabinet fronts'], backsplash:['backsplash','Tezgah arası','the backsplash between countertop and upper cabinets'],
+  island:['island','Ada','the kitchen island'], walltile:['walltile','Duvar seramiği','the wall tiles'], floortile:['floortile','Zemin seramiği','the floor tiles'],
+  vanity:['vanity','Lavabo tezgahı','the vanity / washbasin counter'], shower:['shower','Duş alanı','the shower area walls'], fixtures:['fixtures','Armatürler','the taps, fixtures and metal accessories'],
+  sofa:['sofa','Kanepe kumaşı','the sofa upholstery'], rug:['rug','Halı','the rug'], curtain:['curtain','Perde','the curtains'], woodwork:['woodwork','Ahşap mobilya','the wooden furniture'],
+  headboard:['headboard','Yatak başı','the bed headboard'], bedding:['bedding','Yatak tekstili','the bedding and textiles'], wardrobe:['wardrobe','Gardırop','the wardrobe fronts'],
+  desk:['desk','Masa yüzeyi','the desk / table tops'], acoustic:['acoustic','Akustik panel','the acoustic wall / ceiling panels'], seating:['seating','Oturma döşemesi','the seating upholstery'],
+  bar:['bar','Bar tezgahı','the bar counter'], tabletop:['tabletop','Masa tablası','the table tops'], display:['display','Teşhir ünitesi','the display units and shelving'],
+  cashdesk:['cashdesk','Kasa bankosu','the cash desk'], reception:['reception','Resepsiyon bankosu','the reception desk'],
+  backdrop:['backdrop','Arka plan / teşhir mekânı','the background setting'], body:['body','Ana gövde','the main body of the furniture'], upholstery:['upholstery','Döşeme kumaşı','the upholstery fabric'], metal:['metal','Metal detay','the metal legs and details'], top:['top','Tabla yüzeyi','the top surface']
+};
+const SURF_SETS = {
+  facade: ['facade','glazing','paving','roof','landscape'],
+  furniture: ['backdrop','body','upholstery','metal','top'],
+  living: ['floor','wall','ceiling','sofa','rug','curtain','woodwork'],
+  kitchen: ['counter','cabinets','backsplash','island','floor','wall','ceiling'],
+  bedroom: ['floor','wall','ceiling','headboard','bedding','wardrobe','curtain'],
+  bath: ['walltile','floortile','vanity','shower','fixtures','ceiling'],
+  office: ['floor','wall','ceiling','desk','acoustic','seating'],
+  cafe: ['floor','wall','ceiling','bar','tabletop','seating'],
+  retail: ['floor','wall','ceiling','display','cashdesk'],
+  lobby: ['floor','wall','ceiling','reception','seating']
+};
+const OLD_RTYPE = { facade:['facade'], glazing:['glazing'], floor:['floor'], wall:['wall'], furniture:['woodwork'], landscape:['landscape'] };
+function surfKeysFor(cat, space){ return cat==='interior' ? (SURF_SETS[space] || SURF_SETS.living) : (SURF_SETS[cat] || SURF_SETS.facade); }
+// variation presets on result cards: [key, label, icon, opts override]
+const VARS = [
+  ['night','Gece',IC.night,{time:'night'}], ['blue','Mavi saat',IC.blue,{time:'blue'}], ['sunset','Gün batımı',IC.sunset,{time:'sunset'}],
+  ['winter','Kış',IC.winter,{season:'winter'}], ['autumn','Sonbahar',IC.autumn,{season:'autumn'}], ['spring','İlkbahar',IC.spring,{season:'spring'}],
+  ['rain','Yağmurlu',IC.rain,{weather:'rain'}], ['fog','Sisli',IC.fog,{weather:'fog'}], ['people','İnsanlı',IC.people,{shot:'people'}],
+  ['detail','Detay çekim',IC.detail,{shot:'detail'}], ['angle','Farklı açı',IC.angle,{shot:'angle'}], ['maket','Maket stili',IC.maket,{style:'maket'}]
+];
+const MINW = { image:180, result:200, prompt:300, ref:180, edit:240 };
+const EDIT_W = 300;
+const LOCK_TOP = `MOST IMPORTANT: image 1 defines the exact camera position, viewing angle, framing, perspective and geometry. The result must match image 1 line for line. Every instruction below applies only to materials, light, atmosphere and entourage, never to the camera or the built form.`;
+const LOCK_TOP_DESIGN = `MOST IMPORTANT: the design shown in image 1 (its geometry, proportions, openings and materials) must stay identical. Only the camera framing may change, as described below.`;
+const LOCK_END = `Reminder: same camera, framing, perspective and geometry as image 1.`;
+// architectural styles: today's styles only. Exterior list for facades; interior list for interiors and furniture.
+const ARCH_EXT = [
+  ['none','Yok',''],
+  ['minimal','Modern minimal','Design language: modern minimalist, clean lines, few materials and a restrained palette.'],
+  ['contemp','Çağdaş','Design language: contemporary, a layered facade with a considered mix of materials.'],
+  ['louver','Lamel / kafes cephe','Design language: facade with vertical or horizontal louvers and perforated metal or timber screens that cast rich shadow patterns.'],
+  ['brick','Çağdaş tuğla','Design language: contemporary brick architecture with patterned bond work and perforated brick screens.'],
+  ['concrete','Brüt beton','Design language: contemporary exposed-concrete architecture, calm monolithic surfaces with refined details.'],
+  ['timber','Ahşap yapı','Design language: mass-timber (CLT) architecture with exposed timber structure and timber cladding.'],
+  ['glass','Cam ve metal','Design language: glass-and-metal curtain wall architecture with slim profiles, transparent and sleek.'],
+  ['param','Parametrik','Design language: parametric facade with flowing, repeating modular elements.'],
+  ['vernac','Yerel çağdaş','Design language: a contemporary reinterpretation of regional materials such as local stone, plaster and timber.']
+];
+const ARCH_INT = [
+  ['none','Yok',''],
+  ['warmmin','Sıcak minimal','Interior style: warm minimalism, beige and sand tones, travertine, rounded forms and soft light.'],
+  ['japandi','Japandi','Interior style: Japandi, calm natural wood and linen, earthy tones, few objects.'],
+  ['scandi','İskandinav','Interior style: Scandinavian, light wood, white surfaces, bright and simple.'],
+  ['wabi','Wabi-sabi','Interior style: wabi-sabi, lime plaster, raw textures, natural imperfections and a serene mood.'],
+  ['indus','Endüstriyel / loft','Interior style: industrial loft, exposed concrete, metal and brick, visible services.'],
+  ['lux','Lüks çağdaş','Interior style: contemporary luxury, marble, brass details, dark wood and layered lighting.'],
+  ['medmod','Modern Akdeniz','Interior style: modern Mediterranean, lime plaster, natural stone, light tones and linen textiles.'],
+  ['mcm','Mid-century modern','Interior style: mid-century modern, walnut wood, slender-legged furniture and warm color accents.']
+];
+const ARCH_FURN = [
+  ['none','Yok',''],
+  ['sheet','Bükme sac metal','Furniture style: folded thin sheet metal, powder-coated, crisp edges and bends.'],
+  ['darkwood','Koyu masif ahşap','Furniture style: solid walnut or dark oak with visible grain and knots.'],
+  ['lightwood','Açık ahşap','Furniture style: oak or ash with a matte oiled finish, slim and simple.'],
+  ['lacquer','Lake / cilalı','Furniture style: glossy lacquered surfaces with sharp geometric lines.'],
+  ['stone','Taş ve mermer','Furniture style: solid stone or colored marble bodies and tops.'],
+  ['microconcrete','Mikro beton','Furniture style: seamless, matte, fine-grained micro-concrete surfaces.'],
+  ['glass','Renkli cam ve reçine','Furniture style: translucent colored glass or cast resin.'],
+  ['upholstered','Döşemeli / tekstil','Furniture style: bouclé, velvet or linen upholstery with soft, generous forms.'],
+  ['woven','Örgü ve hasır','Furniture style: rattan, cane or rope weave, natural and light.']
+];
+const FURN_BG = [
+  ['white','Beyaz stüdyo','Background: replace the 3D screenshot background with a seamless pure white studio backdrop and soft, even studio lighting, like a catalogue photo.'],
+  ['color','Renkli stüdyo','Background: replace the 3D screenshot background with a seamless studio backdrop in a warm neutral tone (beige, warm grey or earthy) and soft studio lighting.'],
+  ['showroom','Showroom / teşhir','Background: place the piece in a spacious, minimal furniture showroom with spotlights.'],
+  ['gallery','Galeri','Background: place the piece in a gallery space with white walls and a polished concrete floor, exhibition atmosphere.'],
+  ['living','Yaşam alanı','Background: place the piece in a fitting contemporary living or dining room, in everyday use.'],
+  ['outdoor','Dış mekân','Background: place the piece on a terrace or in a garden with natural daylight.']
+];
+const LOCK_TOP_FURN = `MOST IMPORTANT: the furniture piece must keep exactly the same form, proportions, details and viewing angle as in image 1. Every instruction below applies only to materials, light, the background and atmosphere; the background of the 3D screenshot may be replaced as described.`;
+const LOCK_END_FURN = `Reminder: same furniture form, proportions, details and viewing angle as image 1.`;
+const archList = cat => cat==='facade' ? ARCH_EXT : cat==='furniture' ? ARCH_FURN : ARCH_INT;
+// main prompt: scene elements (add) and camera character (no angle change)
+const MAIN_ADD = [
+  ['styling','Aksesuar / styling','Style the piece with a few tasteful accessories that suit it (a vase, books, a ceramic piece, a throw or cushion), without covering or changing the piece itself.', ['furniture']],
+  ['animal','Hayvan','Add a few animals (for example a dog or birds) behaving naturally.', ['facade','interior']],
+  ['plant','Bitki','Add plants that suit the setting.', ['facade','interior','furniture']],
+  ['car','Araç','Add a few cars at correct scale, parked or passing.', ['facade']],
+  ['furniture','Mobilya','Add suitable furniture that fits the design.', ['facade','interior']],
+  ['decor','Dekoratif obje','Add tasteful decorative objects that fit the design (vases, books, art, cushions, ceramics, a table lamp) so the space feels lived-in; do not overdo it and do not move the existing furniture.', ['interior']],
+  ['user','Kullanan kişi','Add one person naturally using the piece (sitting, leaning or working at it), at correct scale and anatomically natural, without hiding its form.', ['furniture']]
+];
+const addItemsFor = cat => MAIN_ADD.filter(x => !x[3] || x[3].includes(cat));
+// people density 0–5
+const PEOPLE_LBL = ['Yok','Tek tük','Az','Hareketli','Yoğun','Kalabalık'];
+const PEOPLE_EXT = ['',
+  'People: one to three small figures in the distance, only for scale.',
+  'People: a few people, a quiet everyday moment.',
+  'People: a lively scene like a café terrace, people sitting and walking.',
+  'People: a busy street, people constantly on the move.',
+  'People: a crowded public square, as during an event, with many people and lots of movement.'];
+const PEOPLE_INT = ['',
+  'People: one or two people in the background, only for scale.',
+  'People: a few people quietly using the space.',
+  'People: a lively atmosphere, people sitting, talking and moving through the space.',
+  'People: a busy space with many people using it.',
+  'People: a packed space, like a full café or lobby.'];
+const peopleText = (cat, lvl) => lvl > 0 ? (cat==='facade' ? PEOPLE_EXT : PEOPLE_INT)[lvl] + ' Keep every person at correct scale and anatomically natural.' : '';
+const MAIN_CAM = [
+  ['dof','Sığ odak','Camera: shallow depth of field with a softly blurred background.'],
+  ['motion','Hareket bulanıklığı','Camera: slight motion blur on moving people and vehicles.'],
+  ['anamorph','Anamorfik','Camera: anamorphic lens look with subtle horizontal flares.'],
+  ['grain','Film greni','Camera: subtle film grain.'],
+  ['cine','Sinematik renk','Camera: cinematic color grade.']
+];
+// edit card: correction-focused quick choices
+const ED_FIX_RECIPES = [
+  ['raw','Ham render iyileştirme','Enhance this raw render into a polished, photorealistic image: realistic materials, balanced exposure, natural contact shadows and fine surface detail. Do not redesign anything.'],
+  ['fixday','Sahne kurtarma · gündüz','Fix typical daytime render problems: tame blown-out windows and sky while keeping them readable, balance the exposure, add soft bounce light and realistic contact shadows.'],
+  ['fixnight','Sahne kurtarma · gece','Fix typical night render problems: clean the noise in dark areas, control glare from light fixtures, avoid pure black areas, realistic warm glow from windows and fixtures.'],
+  ['sharp','Detay ve netlik','Increase the perceived resolution and sharpness: crisp micro-texture on every material and clean edges, without halos or over-sharpening artifacts.']
+];
+const ED_FIX = [
+  ['denoise','Denoise','Remove render noise and grain while keeping fine texture.'],
+  ['ao','Temas gölgesi','Strengthen soft contact shadows where objects meet surfaces.'],
+  ['expo','Dengeli pozlama','Balance the exposure: recover blown highlights and lift crushed shadows.'],
+  ['balanced','Dengeli ışık','Distribute the light evenly and naturally across the scene.'],
+  ['photo','Fotogerçekçi','Make the whole image read as a real photograph, not a CG render.']
+];
+function quickCount(q){ q = q || {}; return (q.recipe ? 1 : 0) + (q.fix||[]).length; }
+function quickSentences(e){
+  const q = e.q || {}, out = [];
+  const rc = ED_FIX_RECIPES.find(r => r[0]===q.recipe); if (rc) out.push(rc[2]);
+  ED_FIX.forEach(([k,, t]) => { if ((q.fix||[]).includes(k)) out.push(t); });
+  return out;
+}
+// collapsible section helper; open state is kept per card while the page is open
+const secOpen = new Map();
+function makeSec(n, key, title, summary, active, build){
+  const d = document.createElement('details'); d.className = 'osec'; d.open = !!secOpen.get(n.id + key);
+  d.ontoggle = () => secOpen.set(n.id + key, d.open);
+  d.innerHTML = '<summary><span class="st"></span><span class="ss"></span></summary><div class="sb"></div>';
+  d.querySelector('.st').textContent = title;
+  const ss = d.querySelector('.ss'); ss.textContent = summary; ss.classList.toggle('on', !!active);
+  build(d.querySelector('.sb'));
+  return d;
+}
+function chipBtn(label, on, fn){ const b = document.createElement('button'); b.type = 'button'; b.className = 'chip' + (on ? ' on' : ''); b.textContent = label; b.setAttribute('aria-pressed', !!on); b.onclick = fn; return b; }
+const FIX_TEXT = `Final touch-up: fix distorted or unnatural details only. Make human faces, hands and bodies anatomically correct and natural, with realistic proportions and expressions that fit their scale in the scene. Also fix warped text and signs, deformed cars, bicycles, trees and small objects. Do not change the composition, architecture, materials or lighting.`;
+const MASK_OA = `Only change the area covered by the mask (the transparent region of the mask). Keep everything outside that area exactly the same.`;
+const MASK_GEM = `The area highlighted with a semi-transparent red overlay in image 1 is the only area to change. Keep everything outside it exactly the same, and do not keep the red overlay in the result.`;
+const SKETCH_TXT = `The rough hand-drawn colored strokes on image 1 are sketch annotations showing the shape and position of what to add or change. Turn them into realistic elements that fit the scene; do not render the strokes themselves.`;
+const LOCK_EDIT = `IMPORTANT, composition lock: keep the camera position, viewing angle, focal length, perspective and framing of image 1 exactly. Do not move or reshape the existing architecture beyond the requested change.`;
+const mimeOf = url => (url||'').slice(5, (url||'').indexOf(';')) || 'image/jpeg';
+const b64Of = url => (url||'').split(',')[1] || '';
+
+/* ================= settings (localStorage) ================= */
+const LS = {
+  get(k,d){ try{ const v = localStorage.getItem('rob_'+k); return v===null ? d : JSON.parse(v); }catch(e){ return d; } },
+  set(k,v){ try{ localStorage.setItem('rob_'+k, JSON.stringify(v)); }catch(e){} }
+};
+const keyEl = $('#apiKey'), oaKeyEl = $('#oaKey');
+keyEl.value = LS.get('key','');
+oaKeyEl.value = LS.get('oakey','');
+keyEl.addEventListener('input', () => LS.set('key', keyEl.value.trim()));
+oaKeyEl.addEventListener('input', () => LS.set('oakey', oaKeyEl.value.trim()));
+document.querySelectorAll('[data-toggle]').forEach(b => b.onclick = () => {
+  const inp = document.getElementById(b.dataset.toggle), p = inp.type==='password';
+  inp.type = p ? 'text' : 'password'; b.textContent = p ? 'Gizle' : 'Göster';
+});
+['provider','oaModel','oaCustom','oaQuality','oaRes','textProvider','oaTextModel','model','customModel','textModel','aspect','conc','maxSide'].forEach(id => {
+  const el = document.getElementById(id); const v = LS.get('s_'+id, null); if (v!==null) el.value = v;
+  el.addEventListener('change', () => { LS.set('s_'+id, el.value); syncModel(); pump(); });
+});
+function syncModel(){
+  $('#customModel').hidden = $('#model').value!=='custom';
+  $('#oaCustom').hidden = $('#oaModel').value!=='custom';
+  const oa = $('#provider').value==='openai';
+  $('#oaBox').style.display = oa || $('#textProvider').value==='openai' ? 'flex' : 'none';
+  $('#gmBox').style.display = !oa || $('#textProvider').value==='gemini' ? 'flex' : 'none';
+}
+syncModel();
+const provider = () => $('#provider').value;
+const modelName = () => provider()==='openai'
+  ? ($('#oaModel').value==='custom' ? $('#oaCustom').value.trim() : $('#oaModel').value)
+  : ($('#model').value==='custom' ? $('#customModel').value.trim() : $('#model').value);
+const keyFor = prov => (prov==='openai' ? oaKeyEl : keyEl).value.replace(/[^\x21-\x7e]/g,'');
+$('#oaTest').onclick = async () => {
+  const out = $('#oaTestOut'), key = keyFor('openai');
+  if (!key){ out.textContent = 'Önce anahtarı yapıştır.'; return; }
+  out.textContent = 'Test ediliyor…'; out.style.color = '';
+  try{
+    const r = await fetch('https://api.openai.com/v1/models', { headers:{ 'Authorization':'Bearer ' + key } });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok){ out.style.color = 'var(--err)'; out.textContent = `Çalışmıyor (${r.status}): ${d?.error?.message || r.statusText}`; return; }
+    const ids = (d.data||[]).map(m => m.id), img = ids.filter(i => /^gpt-image/.test(i));
+    const want = modelName(), has = ids.includes(want);
+    out.style.color = has ? 'var(--ok)' : 'var(--err)';
+    out.textContent = has ? `Anahtar çalışıyor. ${want} erişimi var.`
+      : `Anahtar çalışıyor ama ${want} listede yok. Erişilebilen görsel modelleri: ${img.join(', ') || 'yok'}`;
+  }catch(e){ out.style.color = 'var(--err)'; out.textContent = 'OpenAI’ye bağlanılamadı: ' + e.message; }
+};
+
+/* ================= IndexedDB storage ================= */
+const DB = {
+  db:null,
+  open(){ return new Promise(res => { try{
+    const r = indexedDB.open('render-optimizasyon', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('boards', { keyPath:'id' });
+    r.onsuccess = () => { this.db = r.result; res(true); };
+    r.onerror = () => res(false);
+  }catch(e){ res(false); } }); },
+  req(mode, fn){ return new Promise((res, rej) => { if (!this.db) return rej(new Error('no db'));
+    const q = fn(this.db.transaction('boards', mode).objectStore('boards')); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+  put(b){ return this.req('readwrite', s => s.put(b)); },
+  get(id){ return this.req('readonly', s => s.get(id)); },
+  del(id){ return this.req('readwrite', s => s.delete(id)); }
+};
+let metas = LS.get('boards', []); // [{id,name,updated}]
+const saveMetas = () => LS.set('boards', metas);
+
+/* ================= board state ================= */
+let B = null;              // current board
+const els = new Map();     // node id -> element
+let sel = new Set(), selEdge = null, zTop = 10;
+const uid = () => Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4);
+const N = id => B.nodes.find(n => n.id===id);
+const letterOf = i => { let s=''; i++; while(i>0){ const m=(i-1)%26; s=String.fromCharCode(65+m)+s; i=Math.floor((i-1)/26); } return s; };
+const colorOf = n => COLORS[(n.ci||0) % COLORS.length];
+
+function newBoard(name){
+  const b = { id: uid(), name: name || 'Yeni board', view:{x:0,y:0,z:1}, nodes:[], edges:[], letterSeq:0, editSeq:0, created:Date.now() };
+  return b;
+}
+function makePrompt(x, y, opts={}){
+  const i = B.letterSeq++;
+  const n = { id:uid(), type:'prompt', x, y, w:PR_W, letter:letterOf(i), ci:i, title:'', cat:opts.cat||'facade',
+    text: opts.text ?? TEMPLATES[opts.cat||'facade'], variants: opts.variants||1, idea:'', withImg:true,
+    opts: { ...DEF_OPTS, ...(opts.opts||{}) }, lock: opts.lock ?? true };
+  B.nodes.push(n); return n;
+}
+
+/* ================= view ================= */
+function applyView(){
+  const {x,y,z} = B.view;
+  world.style.transform = `translate(${x}px,${y}px) scale(${z})`;
+  let step = 24; while (step*z < 14) step *= 4;
+  vp.style.backgroundSize = `${step*z}px ${step*z}px`;
+  vp.style.backgroundPosition = `${x}px ${y}px`;
+  $('#zoomLbl').textContent = Math.round(z*100)+'%';
+}
+function zoomAt(cx, cy, nz){
+  nz = Math.max(0.08, Math.min(3, nz));
+  const v = B.view, wx = (cx - v.x)/v.z, wy = (cy - v.y)/v.z;
+  v.z = nz; v.x = cx - wx*nz; v.y = cy - wy*nz; applyView(); scheduleSave(true);
+}
+const toWorld = (cx, cy) => ({ x:(cx - B.view.x)/B.view.z, y:(cy - B.view.y)/B.view.z });
+const viewCenter = () => toWorld(innerWidth/2, innerHeight/2);
+function nodeH(n){ const el = els.get(n.id); return el ? el.offsetHeight : 200; }
+function bbox(nodes){
+  let x1=Infinity,y1=Infinity,x2=-Infinity,y2=-Infinity;
+  nodes.forEach(n => { x1=Math.min(x1,n.x); y1=Math.min(y1,n.y); x2=Math.max(x2,n.x+n.w); y2=Math.max(y2,n.y+nodeH(n)); });
+  return {x1,y1,x2,y2};
+}
+function fitView(){
+  if (!B.nodes.length){ B.view = {x:0,y:0,z:1}; applyView(); return; }
+  const b = bbox(B.nodes), pad = 90, top = 70, bottom = 80;
+  const w = b.x2-b.x1, h = b.y2-b.y1;
+  const z = Math.max(0.08, Math.min(1.2, (innerWidth-pad*2)/w, (innerHeight-top-bottom-pad)/h));
+  B.view = { z, x: innerWidth/2 - (b.x1+w/2)*z, y: top + (innerHeight-top-bottom)/2 - (b.y1+h/2)*z };
+  applyView(); scheduleSave(true);
+}
+
+/* ================= node DOM ================= */
+function buildNode(n){
+  const el = document.createElement('div');
+  el.className = 'node ' + ({image:'nimg', prompt:'npr', result:'nres', ref:'nref', edit:'nedit'})[n.type];
+  el.dataset.id = n.id;
+  el.style.zIndex = ++zTop;
+  if (n.type==='image') buildImage(el, n);
+  if (n.type==='prompt') buildPrompt(el, n);
+  if (n.type==='result') buildResult(el, n);
+  if (n.type==='ref') buildRef(el, n);
+  if (n.type==='edit') buildEdit(el, n);
+  const rz = document.createElement('div'); rz.className = 'rz'; rz.title = 'Boyutlandır'; rz.innerHTML = ICON.rz; el.appendChild(rz);
+  world.appendChild(el); els.set(n.id, el); placeNode(n);
+  return el;
+}
+function rebuildNode(n){ const old = els.get(n.id); const z = old?.style.zIndex; old?.remove(); els.delete(n.id); const el = buildNode(n); if (z) el.style.zIndex = z; renderWires(); }
+function nameOf(n){
+  if (!n) return '';
+  if (n.type==='result'){ const s = N(n.imageId); return (s ? nameOf(s) : (n.imageName || 'render')) + '_' + n.letter + (/\d$/.test(n.letter) ? '-' : '') + n.num; }
+  return n.name || '';
+}
+function placeNode(n){ const el = els.get(n.id); if (!el) return; el.style.left = n.x+'px'; el.style.top = n.y+'px'; el.style.width = n.w+'px'; el.classList.toggle('sel', sel.has(n.id)); }
+
+function buildImage(el, n){
+  el.innerHTML = `
+    <div class="port in" title="Ana prompt kartına bağlamak için sürükle"></div>
+    <div class="port down" title="Bu görseli doğrudan düzenlemek için sürükle"></div>
+    <div class="nh"><span class="kind">GİRDİ</span><input class="nm" aria-label="Görsel adı"><button class="ib del" type="button" title="Görseli sil">${ICON.x}</button></div>
+    <img class="thumb" draggable="false" alt="">
+    <div class="nb"><div class="row"><input class="note grow" placeholder="Bu görsele özel ek (isteğe bağlı)"><span class="dimtxt"></span></div></div>`;
+  const nm = el.querySelector('.nm'); nm.value = n.name; nm.oninput = () => { n.name = nm.value; scheduleSave(); };
+  const img = el.querySelector('.thumb'); img.src = n.src; img.style.aspectRatio = `${n.iw}/${n.ih}`;
+  const note = el.querySelector('.note'); note.value = n.note||''; note.oninput = () => { n.note = note.value; scheduleSave(); };
+  el.querySelector('.dimtxt').textContent = `${n.iw}×${n.ih}`;
+  el.querySelector('.del').onclick = () => deleteNodes([n.id]);
+}
+
+function buildPrompt(el, n){
+  el.style.setProperty('--c', colorOf(n));
+  el.innerHTML = `
+    <div class="port in" title="Referans kartı bağlamak için sürükle"></div>
+    <div class="port out" title="Görsellere bağlamak için sürükle"></div>
+    <div class="nh"><span class="badge"></span><span class="kind">ANA PROMPT</span><input class="nm" placeholder="Alternatif" aria-label="Prompt adı">
+      <button class="ib lock" type="button"></button>
+      <button class="ib dup" type="button" title="Aynı bağlantılarla kopyala (yeni alternatif)">${ICON.dup}</button>
+      <button class="ib del" type="button" title="Prompt kartını sil">${ICON.x}</button></div>
+    <div class="nb">
+      <div class="row"><select class="sel2 cat grow" aria-label="Kategori">
+        <option value="facade">Cephe</option><option value="interior">İç mekân</option><option value="furniture">Mobilya</option></select>
+        <button class="sm tpl" type="button">Şablonu yükle</button></div>
+      <textarea class="txt" spellcheck="false" placeholder="Bağlı görsellerin hepsine uygulanacak render promptu…"></textarea>
+      <div class="opts"></div>
+      <details class="writer full"><summary>Gönderilecek tam prompt</summary><pre class="fullp"></pre></details>
+      <details class="writer wr"><summary>Prompt yazdır (Türkçe anlat)</summary>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <textarea class="idea" placeholder="ör. Beyaz sıva ve ahşap lamelli cephe, ince metal doğramalar"></textarea>
+          <div class="row"><label class="chk grow"><input type="checkbox" class="wimg"> İlk bağlı görseli göster</label><button class="sm write" type="button">Yaz</button></div>
+        </div></details>
+    </div>
+    <div class="nf"><span class="meta"></span>
+      <select class="sel2 var" aria-label="Görsel başına render" title="Görsel başına render sayısı"><option value="1">×1</option><option value="2">×2</option><option value="3">×3</option><option value="4">×4</option></select>
+      <button class="go run" type="button">Renderla</button></div>`;
+  el.querySelector('.badge').textContent = n.letter;
+  const nm = el.querySelector('.nm'); nm.value = n.title||''; nm.placeholder = 'Alternatif ' + n.letter;
+  nm.oninput = () => { n.title = nm.value; scheduleSave(); };
+  const cat = el.querySelector('.cat'); cat.value = n.cat; cat.onchange = () => {
+    const untouched = Object.values(TEMPLATES).some(t => t.trim()===(n.text||'').trim()) || !(n.text||'').trim();
+    n.cat = cat.value;
+    if (untouched){ n.text = TEMPLATES[n.cat]; txt.value = n.text; toast(CAT_NAME[n.cat] + ' şablonu yüklendi'); }
+    renderOpts(n); updateFull(n); refreshRefsOf(n); scheduleSave(); };
+  const txt = el.querySelector('.txt'); txt.value = n.text; txt.oninput = () => { n.text = txt.value; updateFull(n); scheduleSave(); };
+  if (n.th) txt.style.height = n.th+'px';
+  new ResizeObserver(() => { if (txt.offsetHeight && Math.abs((n.th||0) - txt.offsetHeight) > 2){ n.th = txt.offsetHeight; renderWires(); scheduleSave(); } }).observe(txt);
+  el.querySelector('.tpl').onclick = () => { txt.value = n.text = TEMPLATES[n.cat]; updateFull(n); scheduleSave(); toast(CAT_NAME[n.cat] + ' şablonu yüklendi'); };
+  const idea = el.querySelector('.idea'); idea.value = n.idea||''; idea.oninput = () => { n.idea = idea.value; scheduleSave(); };
+  const wimg = el.querySelector('.wimg'); wimg.checked = n.withImg!==false; wimg.onchange = () => { n.withImg = wimg.checked; scheduleSave(); };
+  el.querySelector('.write').onclick = e => writePrompt(n, e.currentTarget);
+  const vr = el.querySelector('.var'); vr.value = String(n.variants||1); vr.onchange = () => { n.variants = +vr.value; scheduleSave(); };
+  el.querySelector('.run').onclick = () => runPrompts([n]);
+  el.querySelector('.dup').onclick = () => duplicatePrompt(n);
+  el.querySelector('.del').onclick = () => deleteNodes([n.id]);
+  const lk = el.querySelector('.lock');
+  lk.onclick = () => {
+    n.lock = n.lock===false; syncLock(n); renderOpts(n); updateFull(n); scheduleSave();
+    toast(n.lock ? 'Geometri kilidi açık: açı, perspektif ve çizgiler korunacak' : 'Geometri kilidi kapalı: model açıyı ve çizgileri değiştirebilir', 3500);
+  };
+  el.querySelector('.full').ontoggle = () => updateFull(n);
+  syncLock(n, el); renderOpts(n, el);
+  updatePromptMeta(n, el);
+}
+function syncLock(n, el = els.get(n.id)){
+  if (!el) return;
+  const lk = el.querySelector('.lock'), on = n.lock!==false;
+  lk.classList.toggle('on', on); lk.innerHTML = on ? ICON.lock : ICON.unlock;
+  lk.title = on ? 'Geometri kilidi açık: kamera açısı, perspektif ve çizgiler korunur. Kapatmak için tıkla.' : 'Geometri kilidi kapalı. Açmak için tıkla.';
+}
+function normOpts(n){
+  n.opts = { ...DEF_OPTS, ...(n.opts||{}) };
+  if (n.opts.shot==='people'){ n.opts.shot = 'calm'; if (!n.opts.people) n.opts.people = 3; }
+  if ((n.opts.add||[]).includes('person')){ if (!n.opts.people) n.opts.people = 2; n.opts.add = n.opts.add.filter(x => x!=='person'); }
+  n.opts.people = Math.max(0, Math.min(5, +n.opts.people || 0));
+  n.opts.add = [...(n.opts.add||[])]; n.opts.cam = [...(n.opts.cam||[])];
+}
+function renderOpts(n, el = els.get(n.id)){
+  if (!el) return;
+  const box = el.querySelector('.opts'); box.innerHTML = ''; box.className = 'opts secs';
+  normOpts(n);
+  const changed = (refs) => { renderOpts(n); updateFull(n); if (refs) refreshRefsOf(n); scheduleSave(); };
+  // 1. scene settings (existing rows)
+  const vis = OPTS.filter(g => optVisible(g, n.cat));
+  const cur = g => g.items.find(i => i[0]===n.opts[g.k]) || g.items[0];
+  const summary = vis.filter(g => !(g.k==='shot' && n.opts.shot==='calm')).map(g => cur(g)[1]).join(' · ');
+  box.appendChild(makeSec(n, 'scene', 'Sahne ayarları', summary, false, sb => {
+    vis.forEach(g => {
+      const row = document.createElement('div'); row.className = 'orow';
+      const c = cur(g);
+      if (g.chips){
+        row.classList.add('wrapr'); row.innerHTML = `<span class="olbl">${g.lbl}</span><span class="chips"></span>`;
+        g.items.forEach(it => row.querySelector('.chips').appendChild(chipBtn(it[1], it[0]===c[0], () => { n.opts[g.k] = it[0]; changed(true); })));
+        sb.appendChild(row); return;
+      }
+      row.innerHTML = `<span class="olbl">${g.lbl}</span><span class="oset"></span><span class="oval"></span>`;
+      row.querySelector('.oval').textContent = c[1];
+      g.items.filter(it => !(g.k==='shot' && it[0]==='people')).forEach(it => {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'ob' + (it[0]===c[0] ? ' on' : '');
+        b.innerHTML = it[2]; b.title = it[1]; b.setAttribute('aria-label', g.lbl + ': ' + it[1]); b.setAttribute('aria-pressed', it[0]===c[0]);
+        b.onclick = () => { n.opts[g.k] = it[0]; changed(); };
+        row.querySelector('.oset').appendChild(b);
+      });
+      sb.appendChild(row);
+    });
+    if (n.lock!==false && CAMERA_FREE.has(n.opts.shot)){ const h = document.createElement('div'); h.className = 'ohint'; h.style.paddingLeft = '0'; h.textContent = 'Kamera değişir; tasarım ve malzemeler kilitli kalır.'; sb.appendChild(h); }
+  }));
+  // 2. architectural style
+  const al = archList(n.cat), a = al.find(x => x[0]===n.opts.arch) || al[0];
+  box.appendChild(makeSec(n, 'arch', n.cat==='furniture' ? 'Mobilya stili' : 'Mimari stil', a[1], a[0]!=='none', sb => {
+    const ch = document.createElement('div'); ch.className = 'chips';
+    al.forEach(it => ch.appendChild(chipBtn(it[1], it[0]===a[0], () => { n.opts.arch = it[0]; changed(); })));
+    sb.appendChild(ch);
+    const h = document.createElement('div'); h.className = 'qhint'; h.textContent = n.lock!==false ? 'Geometri kilidi açık: stil sadece malzeme, renk ve detaylara yansır.' : 'Geometri kilidi kapalı: stil formu da değiştirebilir.';
+    sb.appendChild(h);
+  }));
+  // 2b. background (furniture only)
+  if (n.cat==='furniture'){
+    const refBg = refsOf(n).some(r => isBackdropRef(r, ctxOf(n)));
+    const bg = FURN_BG.find(x => x[0]===n.opts.bg) || FURN_BG[0];
+    box.appendChild(makeSec(n, 'bg', 'Arka plan', refBg ? 'Referans görselden' : bg[1], true, sb => {
+      if (refBg){ const h = document.createElement('div'); h.className = 'qhint'; h.textContent = 'Bağlı bir "Arka plan / teşhir mekânı" referansı var; arka plan oradan alınıyor.'; sb.appendChild(h); return; }
+      const ch = document.createElement('div'); ch.className = 'chips';
+      FURN_BG.forEach(it => ch.appendChild(chipBtn(it[1], it[0]===bg[0], () => { n.opts.bg = it[0]; changed(); })));
+      sb.appendChild(ch);
+      const h = document.createElement('div'); h.className = 'qhint'; h.textContent = 'Kendi mekân fotoğrafını kullanmak için bir referans kartı bağla ve "Arka plan / teşhir mekânı"nı seç.'; sb.appendChild(h);
+    }));
+  }
+  // 3. scene elements: people density slider + items for this category
+  const items = addItemsFor(n.cat), addOn = items.filter(x => n.opts.add.includes(x[0]));
+  const showPeople = n.cat!=='furniture';
+  const sumParts = [...(showPeople && n.opts.people ? ['İnsan: ' + PEOPLE_LBL[n.opts.people]] : []), ...addOn.map(x => x[1])];
+  box.appendChild(makeSec(n, 'add', 'Sahne öğeleri', sumParts.length ? sumParts.join(', ') : 'Yok', sumParts.length, sb => {
+    const pr = document.createElement('div'); pr.className = 'orow';
+    pr.innerHTML = '<span class="olbl">İnsan</span><input type="range" min="0" max="5" step="1" class="grow" aria-label="İnsan yoğunluğu"><span class="oval" style="flex:none;min-width:70px"></span>';
+    const rg = pr.querySelector('input'), lv = pr.querySelector('.oval');
+    rg.value = n.opts.people; lv.textContent = n.opts.people + ' · ' + PEOPLE_LBL[n.opts.people];
+    rg.oninput = () => { lv.textContent = rg.value + ' · ' + PEOPLE_LBL[+rg.value]; };
+    rg.onchange = () => { n.opts.people = +rg.value; changed(); };
+    if (showPeople) sb.appendChild(pr);
+    const ch = document.createElement('div'); ch.className = 'chips';
+    items.forEach(([k, lbl]) => ch.appendChild(chipBtn(lbl, n.opts.add.includes(k), () => { n.opts.add = n.opts.add.includes(k) ? n.opts.add.filter(x => x!==k) : [...n.opts.add, k]; changed(); })));
+    sb.appendChild(ch);
+  }));
+  // 4. camera character (never changes the angle)
+  const camOn = MAIN_CAM.filter(x => n.opts.cam.includes(x[0]));
+  box.appendChild(makeSec(n, 'cam', 'Kamera', camOn.length ? camOn.map(x => x[1]).join(', ') : 'Yok', camOn.length, sb => {
+    const ch = document.createElement('div'); ch.className = 'chips';
+    MAIN_CAM.forEach(([k, lbl]) => ch.appendChild(chipBtn(lbl, n.opts.cam.includes(k), () => { n.opts.cam = n.opts.cam.includes(k) ? n.opts.cam.filter(x => x!==k) : [...n.opts.cam, k]; changed(); })));
+    sb.appendChild(ch);
+    const h = document.createElement('div'); h.className = 'qhint'; h.textContent = 'Açıyı değiştirmez; sadece çekimin karakterini belirler.'; sb.appendChild(h);
+  }));
+  renderWires();
+}
+function refsOf(p){ return B.edges.filter(e => e.to===p.id).map(e => N(e.from)).filter(r => r && r.type==='ref'); }
+function targetsOf(p){ return B.edges.filter(e => e.from===p.id).map(e => N(e.to)).filter(t => t && (t.type==='image' || t.type==='result')); }
+function inputsOf(e){ return B.edges.filter(x => x.to===e.id).map(x => N(x.from)).filter(isSrcNode); }
+function ctxOf(x){
+  if (!x) return null;
+  if (x.type==='prompt') return { cat:x.cat, space:(x.opts||{}).space || 'living' };
+  if (x.type==='edit'){ const i = inputsOf(x)[0]; return { cat:(i && i.cat) || 'facade', space:((i && i.opts)||{}).space || 'living' }; }
+  return null;
+}
+function ctxOfRef(r){
+  const t = B.edges.filter(e => e.from===r.id).map(e => N(e.to)).find(x => x && (x.type==='prompt' || x.type==='edit'));
+  return t ? ctxOf(t) : null;
+}
+function refSurfaces(r, cat, space){
+  const allowed = surfKeysFor(cat, space);
+  const sel = (r.surf||[]).filter(k => allowed.includes(k));
+  return sel.length ? sel : [allowed[0]];
+}
+const isBackdropRef = (r, ctx) => !!ctx && ctx.cat==='furniture' && refSurfaces(r, 'furniture', ctx.space).includes('backdrop');
+function refSentence(r, k, ctx){
+  let keys = refSurfaces(r, ctx ? ctx.cat : 'facade', ctx ? ctx.space : 'living');
+  let pre = '';
+  if (keys.includes('backdrop')){
+    pre = `Image ${k} is a reference for the setting: place the furniture piece from image 1 into this space, matching its lighting, perspective and scale. Use only the space from image ${k}; do not copy any furniture or objects from it, and keep the piece from image 1 unchanged.`;
+    keys = keys.filter(x => x!=='backdrop'); if (!keys.length) return pre;
+    pre += ' ';
+  }
+  const note = (r.note||'').trim();
+  const where = keys.map(x => SF[x][2]).join(' and ') + (note ? ` (${note})` : '');
+  const what = keys.length===1 && keys[0]==='landscape'
+    ? `use it only as a reference for the planting style, species and vegetation character of ${where} in image 1`
+    : `apply only its material (texture, color, pattern, joint layout and surface finish, at a realistic scale) to ${where} in image 1`;
+  return pre + `Image ${k} is a material reference: ${what}. Do not copy anything else from image ${k}: not its form, geometry, lighting, other colors, composition or camera.`;
+}
+function renderRefSurf(r, el = els.get(r.id)){
+  if (!el) return;
+  const box = el.querySelector('.surfbox'); if (!box) return;
+  const ctx = ctxOfRef(r), cat = ctx ? ctx.cat : 'facade', space = ctx ? ctx.space : 'living';
+  const keys = surfKeysFor(cat, space), on = refSurfaces(r, cat, space);
+  const spaceName = (OPTS[0].items.find(i => i[0]===space) || [,'' ])[1];
+  box.innerHTML = '<div class="surfctx"></div><div class="chips"></div>';
+  box.firstChild.textContent = ctx ? `Nerede kullanılacak? · ${CAT_NAME[cat]}${cat==='interior' ? ' / ' + spaceName : ''}` : 'Nerede kullanılacak? · Bir prompt ya da düzenleme kartına bağlayınca güncellenir';
+  keys.forEach(k => {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'chip' + (on.includes(k) ? ' on' : ''); b.textContent = SF[k][1];
+    b.setAttribute('aria-pressed', on.includes(k));
+    b.onclick = () => {
+      let cur = refSurfaces(r, cat, space);
+      cur = cur.includes(k) ? cur.filter(x => x!==k) : [...cur, k];
+      if (!cur.length) cur = [k];
+      r.surf = [...new Set([...(r.surf||[]).filter(x => !keys.includes(x)), ...cur])];
+      renderRefSurf(r); refreshPromptsOf(r); B.edges.filter(e => e.from===r.id).map(e => N(e.to)).filter(x => x && x.type==='prompt').forEach(x => renderOpts(x)); scheduleSave();
+    };
+    box.lastChild.appendChild(b);
+  });
+}
+function refreshRefsOf(p){ refsOf(p).forEach(r => renderRefSurf(r)); }
+function composePrompt(p, target, refs = refsOf(p)){
+  const o = { ...DEF_OPTS, ...(p.opts||{}) };
+  const parts = [];
+  const camFreeP = CAMERA_FREE.has((p.opts||{}).shot);
+  if (p.lock!==false) parts.push(camFreeP ? LOCK_TOP_DESIGN : (p.cat==='furniture' ? LOCK_TOP_FURN : LOCK_TOP));
+  if (refs.length) parts.push(`Image 1 is the base image to work on. ${refs.length===1 ? 'Image 2 is a reference' : 'Images 2–' + (refs.length+1) + ' are references'} only.`);
+  parts.push((p.text||'').trim());
+  const add = (o.add || []).filter(k => addItemsFor(p.cat).some(x => x[0]===k));
+  const people = p.cat==='furniture' ? 0 : ((+o.people || 0) || (o.shot==='people' ? 3 : 0) || ((o.add||[]).includes('person') ? 2 : 0));
+  const locked = p.lock!==false;
+  const lines = OPTS.filter(g => optVisible(g, p.cat)).map(g => {
+    if (g.k==='shot' && (o.shot==='calm' || o.shot==='people')){
+      const bits = [];
+      if (people <= 2) bits.push('Scene: calm and quiet.');
+      if (!people && !add.includes('user')) bits.push('No people in the scene.');
+      if (p.cat==='facade' && !add.includes('car')) bits.push('No cars in the foreground.');
+      return bits.join(' ');
+    }
+    return (g.items.find(i => i[0]===o[g.k]) || g.items[0])[3];
+  });
+  const arch = archList(p.cat).find(x => x[0]===o.arch);
+  if (arch && arch[2]) lines.push(locked
+    ? (p.cat==='furniture'
+        ? `Apply the following style only to the materials and surfaces; do not change the form, proportions or dimensions of the piece, or the framing. ${arch[2]}`
+        : `Apply the following style only to materials, colors and details, without changing ${p.cat==='facade' ? 'the building form, the openings' : 'the room layout, the furniture positions'} or the framing. ${arch[2]}`)
+    : arch[2]);
+  if (p.cat==='furniture' && !refs.some(r => isBackdropRef(r, ctxOf(p)))){ const bg = FURN_BG.find(x => x[0]===o.bg) || FURN_BG[0]; lines.push(bg[2]); }
+  const ent = [];
+  if (people) ent.push(peopleText(p.cat, people));
+  MAIN_ADD.forEach(([k,, t]) => { if (add.includes(k)) ent.push(t); });
+  if (ent.length){ lines.push(...ent); if (locked) lines.push('Add these elements within the existing framing, without moving the camera or changing the building.'); }
+  MAIN_CAM.forEach(([k,, t]) => { if ((o.cam||[]).includes(k)) lines.push(t); });
+  parts.push(lines.filter(Boolean).join('\n'));
+  refs.forEach((r, i) => parts.push(refSentence(r, i+2, ctxOf(p))));
+  if (target && (target.note||'').trim()) parts.push('Additional instruction for this view: ' + target.note.trim());
+  if (p.lock!==false) parts.push(CAMERA_FREE.has(o.shot) ? LOCK_DESIGN : (p.cat==='furniture' ? LOCK_END_FURN : LOCK_END));
+  return parts.filter(Boolean).join('\n\n');
+}
+function paintFits(e, input){ return !!input && e.paintFor===input.id && e.paintW===input.iw && e.paintH===input.ih; }
+function composeEdit(e, input, refs = refsOf(e), prov = provider()){
+  const parts = [];
+  parts.push(refs.length ? `Image 1 is the render to edit. ${refs.length===1 ? 'Image 2 is a reference' : 'Images 2–' + (refs.length+1) + ' are references'} only.` : 'Image 1 is the render to edit.');
+  const t = (e.text||'').trim();
+  if (t) parts.push('Requested change (it may be written in Turkish): ' + t);
+  const fits = paintFits(e, input);
+  const qs = quickSentences(e); if (qs.length) parts.push(qs.join('\n'));
+  if (fits && e.mask) parts.push(prov==='openai' ? MASK_OA : MASK_GEM);
+  if (fits && e.sketch) parts.push(SKETCH_TXT);
+  const ctx = ctxOf(e);
+  refs.forEach((r, i) => parts.push(refSentence(r, i+2, ctx)));
+  parts.push('Keep everything that is not part of the requested change exactly the same: the design, materials, colors and all other details.');
+  if (e.lock!==false){ parts.unshift(e.camFree ? LOCK_TOP_DESIGN : LOCK_TOP.replace('Every instruction below applies only to materials, light, atmosphere and entourage, never to the camera or the built form.', 'Apply only the requested change; never move the camera.')); parts.push(e.camFree ? LOCK_DESIGN : LOCK_END); }
+  return parts.join('\n\n');
+}
+function updateFull(n, el = n && els.get(n.id)){
+  if (!el || !n) return;
+  const d = el.querySelector('.full'); if (!d || !d.open) return;
+  if (n.type==='prompt') d.querySelector('.fullp').textContent = composePrompt(n, targetsOf(n)[0]);
+  if (n.type==='edit') d.querySelector('.fullp').textContent = composeEdit(n, inputsOf(n)[0]);
+}
+function updatePromptMeta(n, el = els.get(n.id)){
+  if (!el || !n || n.type!=='prompt') return;
+  const c = targetsOf(n).length, r = refsOf(n).length;
+  el.querySelector('.meta').textContent = (c ? `${c} görsel` : 'Bağlı görsel yok') + (r ? ` · ${r} referans` : '');
+  el.querySelector('.run').disabled = !c;
+  updateFull(n, el);
+}
+
+function buildRef(el, n){
+  el.style.setProperty('--c', 'var(--ref)');
+  el.innerHTML = `
+    <div class="port out" title="Bir prompt kartına bağlamak için sürükle"></div>
+    <div class="nh"><span class="kind">REFERANS</span><input class="nm" aria-label="Referans adı"><button class="ib del" type="button" title="Referansı sil">${ICON.x}</button></div>
+    <img class="thumb" draggable="false" alt="" title="Çift tıkla: kırp">
+    <div class="nb">
+      <div class="surfbox"></div>
+      <input class="note" placeholder="Hangi yüzeye? (isteğe bağlı)">
+      <div class="row"><button class="sm crop" type="button">Kırp</button><button class="sm swap" type="button">Değiştir</button><span class="grow"></span><span class="dimtxt"></span></div>
+    </div>`;
+  const nm = el.querySelector('.nm'); nm.value = n.name||''; nm.oninput = () => { n.name = nm.value; scheduleSave(); };
+  const img = el.querySelector('.thumb'); img.src = n.src; img.style.aspectRatio = `${n.iw}/${n.ih}`; img.ondblclick = () => openCrop(n);
+  if (!n.surf) n.surf = OLD_RTYPE[n.rtype] || [];
+  renderRefSurf(n, el);
+  const note = el.querySelector('.note'); note.value = n.note||''; note.oninput = () => { n.note = note.value; refreshPromptsOf(n); scheduleSave(); };
+  el.querySelector('.dimtxt').textContent = `${n.iw}×${n.ih}`;
+  el.querySelector('.crop').onclick = () => openCrop(n);
+  el.querySelector('.swap').onclick = () => { refTarget = n; refIn.click(); };
+  el.querySelector('.del').onclick = () => deleteNodes([n.id]);
+}
+function refreshPromptsOf(r){ B.edges.filter(e => e.from===r.id).forEach(e => updateFull(N(e.to))); }
+
+function buildEdit(el, n){
+  el.style.setProperty('--c', colorOf(n));
+  el.innerHTML = `
+    <div class="port top" title="Düzenlenecek render buraya bağlanır"></div>
+    <div class="port in" title="Referans kartı bağlamak için sürükle"></div>
+    <div class="nh"><span class="badge"></span><span class="kind">DÜZENLEME</span><input class="nm" placeholder="" aria-label="Düzenleme adı">
+      <button class="ib lock" type="button"></button>
+      <button class="ib del" type="button" title="Düzenleme kartını sil">${ICON.x}</button></div>
+    <div class="nb">
+      <textarea class="etxt" placeholder="Ne değişsin? ör. sağdaki sarkıt lambayı kaldır"></textarea>
+      <div class="qbox secs"></div>
+      <div class="pbox"></div>
+      <details class="writer wr"><summary>Prompt yazdır (Türkçe anlat)</summary>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <textarea class="idea" placeholder="ör. sağdaki sarkıt lambayı kaldır, yerine duvara gömme aydınlatma gelsin"></textarea>
+          <div class="row"><label class="chk grow"><input type="checkbox" class="wimg"> Render'ı ve işaretleri göster</label><button class="sm write" type="button">Yaz</button></div>
+        </div></details>
+      <details class="writer full"><summary>Gönderilecek tam prompt</summary><pre class="fullp"></pre></details>
+    </div>
+    <div class="nf"><span class="meta"></span>
+      <select class="sel2 var" aria-label="Render sayısı" title="Kaç render alınsın"><option value="1">×1</option><option value="2">×2</option><option value="3">×3</option><option value="4">×4</option></select>
+      <button class="go run" type="button">Renderla</button></div>`;
+  el.querySelector('.badge').textContent = n.letter;
+  const nm = el.querySelector('.nm'); nm.value = n.title||''; nm.placeholder = 'Adım ' + n.letter; nm.oninput = () => { n.title = nm.value; scheduleSave(); };
+  const t = el.querySelector('.etxt'); t.value = n.text||''; t.oninput = () => { n.text = t.value; updateFull(n); scheduleSave(); };
+  const idea = el.querySelector('.idea'); idea.value = n.idea||''; idea.oninput = () => { n.idea = idea.value; scheduleSave(); };
+  const wimg = el.querySelector('.wimg'); wimg.checked = n.withImg!==false; wimg.onchange = () => { n.withImg = wimg.checked; scheduleSave(); };
+  el.querySelector('.write').onclick = ev => writePrompt(n, ev.currentTarget);
+  const vr = el.querySelector('.var'); vr.value = String(n.variants||1); vr.onchange = () => { n.variants = +vr.value; scheduleSave(); };
+  el.querySelector('.run').onclick = () => runPrompts([n]);
+  el.querySelector('.del').onclick = () => deleteNodes([n.id]);
+  el.querySelector('.lock').onclick = () => {
+    n.lock = n.lock===false; syncLock(n); updateFull(n); scheduleSave();
+    toast(n.lock ? 'Geometri kilidi açık: açı ve perspektif korunacak' : 'Geometri kilidi kapalı: model açıyı değiştirebilir', 3500);
+  };
+  el.querySelector('.full').ontoggle = () => updateFull(n);
+  if (!n.q) n.q = {};
+  syncLock(n, el); renderPaintBox(n, el); renderQuick(n, el); updateEditMeta(n, el);
+}
+function renderQuick(n, el = els.get(n.id)){
+  if (!el) return;
+  const q = n.q = n.q || {};
+  q.fix = (q.fix || []).filter(k => ED_FIX.some(x => x[0]===k));
+  if ((q.light||[]).includes('balanced') && !q.fix.includes('balanced')) q.fix.push('balanced');
+  delete q.light; delete q.mat; delete q.matMode;
+  const box = el.querySelector('.qbox'); box.innerHTML = '';
+  const changed = () => { renderQuick(n); updateFull(n); scheduleSave(); };
+  const rc = ED_FIX_RECIPES.find(r => r[0]===q.recipe);
+  const fx = ED_FIX.filter(x => q.fix.includes(x[0]));
+  const sum = [rc && rc[1], fx.length && (fx.length===1 ? fx[0][1] : `${fx.length} ayar`)].filter(Boolean).join(' + ');
+  box.appendChild(makeSec(n, 'q-fix', 'İyileştirme', sum || 'Yok', !!sum, sb => {
+    const t1 = document.createElement('div'); t1.className = 'qsub'; t1.textContent = 'Hazır düzeltme'; sb.appendChild(t1);
+    const c1 = document.createElement('div'); c1.className = 'chips';
+    ED_FIX_RECIPES.forEach(([k, lbl]) => c1.appendChild(chipBtn(lbl, q.recipe===k, () => { q.recipe = q.recipe===k ? undefined : k; changed(); })));
+    sb.appendChild(c1);
+    const t2 = document.createElement('div'); t2.className = 'qsub'; t2.textContent = 'İnce ayar'; sb.appendChild(t2);
+    const c2 = document.createElement('div'); c2.className = 'chips';
+    ED_FIX.forEach(([k, lbl]) => c2.appendChild(chipBtn(lbl, q.fix.includes(k), () => { q.fix = q.fix.includes(k) ? q.fix.filter(x => x!==k) : [...q.fix, k]; changed(); })));
+    sb.appendChild(c2);
+  }));
+}
+function renderPaintBox(n, el = els.get(n.id)){
+  if (!el) return;
+  const box = el.querySelector('.pbox'); box.innerHTML = '';
+  const input = inputsOf(n)[0], fits = paintFits(n, input) && (n.mask || n.sketch);
+  if (fits && n.preview){
+    const im = document.createElement('img'); im.className = 'pprev'; im.src = n.preview; im.alt = ''; im.title = 'Tıkla: fırça / eskizi düzenle';
+    im.onclick = () => openPaint(n); box.appendChild(im);
+  }
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<button class="sm pb" type="button">${ICON.pen.replace('<svg','<svg width="13" height="13" style="vertical-align:-2px;margin-right:5px"')}${fits ? 'Fırça / eskizi düzenle' : 'Fırça / eskiz'}</button><span class="grow"></span>`;
+  row.querySelector('.pb').onclick = () => openPaint(n);
+  const st = document.createElement('div'); st.className = 'pstate';
+  if (fits){
+    st.textContent = 'Eklenen: ' + [n.mask && 'boyalı alan', n.sketch && 'eskiz'].filter(Boolean).join(' + ');
+    const c = document.createElement('button'); c.className = 'sm'; c.type = 'button'; c.textContent = 'Kaldır';
+    c.onclick = () => { Object.assign(n, { mask:null, maskPaint:null, sketch:null, preview:null }); renderPaintBox(n); updateFull(n); scheduleSave(); };
+    row.appendChild(c);
+  } else {
+    st.textContent = n.camFree ? 'Kamera değişebilir, tasarım kilitli kalır.' : 'İstersen değişecek yeri boya ya da üstüne eskiz çiz.';
+  }
+  box.appendChild(row); box.appendChild(st);
+}
+function updateEditMeta(n, el = els.get(n.id)){
+  if (!el || !n || n.type!=='edit') return;
+  const c = inputsOf(n).length, r = refsOf(n).length;
+  el.querySelector('.meta').textContent = (c ? `${c} render` : 'Render bağlı değil') + (r ? ` · ${r} referans` : '');
+  el.querySelector('.run').disabled = !c;
+  updateFull(n, el);
+}
+
+function buildResult(el, n){
+  el.style.setProperty('--c', COLORS[(n.ci||0)%COLORS.length]);
+  el.innerHTML = `
+    <div class="port in" title="Bir ana prompt kartını bu render'a da uygulamak için sürükle"></div>
+    <div class="port down" title="Düzenleme dalı açmak için sürükle"></div>
+    <div class="nh"><span class="badge"></span><span class="rt"></span>
+      <button class="ib del" type="button" title="Renderı sil">${ICON.x}</button></div>
+    <div class="rbody"></div>
+    <div class="nf"></div>`;
+  el.querySelector('.badge').textContent = n.letter;
+  el.querySelector('.del').onclick = () => deleteNodes([n.id]);
+  updateResult(n, el);
+}
+function updateResult(n, el = els.get(n.id)){
+  if (!el) return;
+  const src = N(n.imageId);
+  const rt = el.querySelector('.rt'); rt.innerHTML = '<b></b> · <span></span>';
+  rt.firstChild.textContent = `Render ${n.num}`; rt.lastChild.textContent = src ? nameOf(src) : (n.imageName||'');
+  rt.title = rt.textContent;
+  const body = el.querySelector('.rbody'), foot = el.querySelector('.nf');
+  body.innerHTML = ''; foot.innerHTML = '';
+  const ar = `${n.iw||16}/${n.ih||9}`;
+  if (n.status==='done' && n.src){
+    const im = document.createElement('img'); im.src = n.src; im.draggable = false; im.alt = '';
+    im.ondblclick = () => openLightbox(n.id); im.title = 'Çift tıkla: büyüt';
+    body.appendChild(im);
+    foot.innerHTML = `<button class="sm cont" type="button" title="Bu render üzerinde değişiklik yap">Devam et</button><button class="sm vary" type="button">Varyasyon ▾</button><span class="meta"></span><button class="ib zm" type="button" title="Büyüt">${ICON.zoom}</button><button class="ib dl" type="button" title="İndir">${ICON.dl}</button>`;
+    foot.querySelector('.cont').onclick = () => createEdit(n, null);
+    foot.querySelector('.vary').onclick = e => openVarPop(n, e.currentTarget);
+    foot.querySelector('.zm').onclick = () => openLightbox(n.id);
+    foot.querySelector('.dl').onclick = () => downloadResult(n);
+  } else if (n.status==='err'){
+    const d = document.createElement('div'); d.className = 'ph err'; d.style.aspectRatio = ar; d.textContent = n.error || 'Bilinmeyen hata';
+    body.appendChild(d);
+    foot.innerHTML = `<span class="meta">Başarısız</span><button class="sm retry" type="button">Tekrar dene</button>`;
+    foot.querySelector('.retry').onclick = () => { n.status='queue'; n.error=''; updateResult(n); queue.push(n.id); qTotal++; pump(); };
+  } else {
+    const d = document.createElement('div'); d.className = 'ph'; d.style.aspectRatio = ar;
+    d.innerHTML = n.status==='run' ? '<div class="spin"></div><div>Renderlanıyor…</div>' : '<div class="spin" style="opacity:.4"></div><div>Sırada</div>';
+    body.appendChild(d);
+    foot.innerHTML = '<span class="meta">Bekleniyor</span>';
+  }
+}
+
+function renderAll(){
+  world.querySelectorAll('.node').forEach(e => e.remove()); els.clear();
+  B.nodes.forEach(buildNode);
+  $('#bname').value = B.name;
+  applyView(); renderWires(); updateEmpty();
+}
+function updateEmpty(){ $('#empty').hidden = B.nodes.some(n => n.type==='image' || n.type==='result' || n.type==='ref'); }
+
+/* ================= wires ================= */
+let tempWire = null; // {a:{x,y}, b:{x,y}, color}
+function curve(a, b){
+  const dx = Math.max(50, Math.abs(b.x-a.x)*0.5);
+  return `M${a.x},${a.y} C${a.x+dx},${a.y} ${b.x-dx},${b.y} ${b.x},${b.y}`;
+}
+function curveV(a, b){
+  const dy = Math.max(40, Math.abs(b.y-a.y)*0.5);
+  return `M${a.x},${a.y} C${a.x},${a.y+dy} ${b.x},${b.y-dy} ${b.x},${b.y}`;
+}
+function edgeGeom(p, i){
+  if (isSrcNode(p) && i.type==='edit'){ const a = { x:p.x+p.w/2, y:p.y+nodeH(p) }, b = { x:i.x+i.w/2, y:i.y }; return { a, b, d:curveV(a,b) }; }
+  const a = { x:p.x+p.w, y:p.y+PORT_Y }, b = { x:i.x, y:i.y+PORT_Y }; return { a, b, d:curve(a,b) };
+}
+function renderWires(){
+  let h = '';
+  for (const r of B.nodes) if (r.type==='result'){
+    const col = COLORS[(r.ci||0)%COLORS.length];
+    const maker = N(r.promptId);
+    if (maker && maker.type==='edit'){
+      h += `<path class="rwire" d="${curve({ x:maker.x+maker.w, y:maker.y+PORT_Y }, { x:r.x, y:r.y+PORT_Y })}" stroke="${col}"/>`; continue;
+    }
+    const i = N(r.imageId); if (!i) continue;
+    if (i.type==='result' && r.y > i.y + nodeH(i) - 4){
+      h += `<path class="rwire" d="${curveV({ x:i.x+i.w/2, y:i.y+nodeH(i) }, { x:r.x+r.w/2, y:r.y })}" stroke="${col}"/>`;
+    } else {
+      h += `<path class="rwire" d="${curve({ x:i.x+i.w, y:i.y+nodeH(i)/2 }, { x:r.x, y:r.y+PORT_Y })}" stroke="${col}"/>`;
+    }
+  }
+  for (const e of B.edges){
+    const p = N(e.from), i = N(e.to); if (!p || !i) continue;
+    const { a, b, d } = edgeGeom(p, i), on = selEdge===e.id;
+    const col = p.type==='ref' ? colorOf(i) : (p.type==='prompt' ? colorOf(p) : colorOf(i));
+    h += `<path class="wire${on?' sel':''}" d="${d}" stroke="${col}"${p.type==='ref' ? ' stroke-dasharray="7 4"' : ''}/><path class="wirehit" data-edge="${e.id}" d="${d}"/>`;
+    if (on) h += `<g class="wiredel" data-edge="${e.id}" transform="translate(${(a.x+b.x)/2},${(a.y+b.y)/2})"><circle r="11"/><path d="M-4,-4L4,4M4,-4L-4,4"/></g>`;
+  }
+  if (tempWire){
+    const { a, b, role } = tempWire;
+    const d = role==='down' ? curveV(a, b) : role==='top' ? curveV(b, a) : role==='in' ? curve(b, a) : curve(a, b);
+    h += `<path class="wire" d="${d}" stroke="${tempWire.color}" stroke-dasharray="6 5"/>`;
+  }
+  svg.innerHTML = h;
+}
+
+/* ================= interactions ================= */
+let act = null, spaceDown = false;
+const isField = t => !!t.closest('input,textarea,select,button,a,summary,label,details .idea');
+
+const touches = new Map(); let pinch = null;
+vp.addEventListener('pointerdown', e => {
+  closeDrawers(); closeVarPop();
+  if (e.pointerType==='touch'){
+    touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+    if (touches.size===2){
+      act = null; tempWire = null; document.body.classList.remove('dragging'); renderWires();
+      const [p1, p2] = [...touches.values()];
+      pinch = { d: Math.hypot(p1.x-p2.x, p1.y-p2.y), z: B.view.z, cx:(p1.x+p2.x)/2, cy:(p1.y+p2.y)/2, vx:B.view.x, vy:B.view.y };
+      return;
+    }
+  }
+  const nodeEl = e.target.closest('.node');
+  if (e.button===1 || (e.button===0 && spaceDown)){ e.preventDefault(); startPan(e, false); return; }
+  if (e.button!==0) return;
+  const wd = e.target.closest('.wiredel'); if (wd){ removeEdge(wd.dataset.edge); return; }
+  const wh = e.target.closest('.wirehit');
+  if (wh){ selEdge = wh.dataset.edge; sel.clear(); syncSel(); renderWires(); return; }
+  if (e.target.closest('.rz') && nodeEl){ startResize(e, nodeEl.dataset.id); return; }
+  const port = e.target.closest('.port');
+  if (port && nodeEl){ startConnect(e, nodeEl.dataset.id, ['out','down','top'].find(c => port.classList.contains(c)) || 'in'); return; }
+  if (nodeEl){
+    if (isField(e.target)) return;
+    if (e.target.closest('.thumb, .rbody img') && e.detail>1) return;
+    startDrag(e, nodeEl.dataset.id); return;
+  }
+  if (document.activeElement && document.activeElement!==document.body) document.activeElement.blur();
+  if (e.shiftKey) startMarquee(e); else startPan(e, true);
+});
+addEventListener('pointermove', e => {
+  if (touches.has(e.pointerId)) touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+  if (pinch && touches.size>=2){
+    const [p1, p2] = [...touches.values()];
+    const d = Math.hypot(p1.x-p2.x, p1.y-p2.y), cx = (p1.x+p2.x)/2, cy = (p1.y+p2.y)/2;
+    const nz = Math.max(0.08, Math.min(3, pinch.z * d / pinch.d));
+    const wx = (pinch.cx - pinch.vx)/pinch.z, wy = (pinch.cy - pinch.vy)/pinch.z;
+    B.view = { z:nz, x: cx - wx*nz, y: cy - wy*nz }; applyView(); return;
+  }
+  if (!act) return;
+  const dxs = e.clientX - act.sx, dys = e.clientY - act.sy;
+  if (Math.abs(dxs)+Math.abs(dys) > 3) act.moved = true;
+  if (act.type==='pan'){
+    B.view.x = act.vx + dxs; B.view.y = act.vy + dys; applyView();
+  } else if (act.type==='drag'){
+    const z = B.view.z;
+    act.items.forEach(it => { it.n.x = it.x + dxs/z; it.n.y = it.y + dys/z; placeNode(it.n); });
+    renderWires();
+  } else if (act.type==='resize'){
+    const z = B.view.z, n = act.n;
+    n.w = Math.round(Math.max(MINW[n.type]||180, Math.min(1600, act.w0 + dxs/z)));
+    if (n.type==='prompt' && act.txt){ n.th = Math.round(Math.max(90, Math.min(1400, act.th0 + dys/z))); act.txt.style.height = n.th + 'px'; }
+    placeNode(n); renderWires();
+  } else if (act.type==='connect'){
+    tempWire.b = toWorld(e.clientX, e.clientY);
+    const t = targetFor(e);
+    document.querySelectorAll('.node.drop-ok').forEach(x => x.classList.remove('drop-ok'));
+    if (t) els.get(t.id).classList.add('drop-ok');
+    renderWires();
+  } else if (act.type==='marq'){
+    const m = $('#marq'), x = Math.min(act.sx,e.clientX), y = Math.min(act.sy,e.clientY), w = Math.abs(dxs), h = Math.abs(dys);
+    Object.assign(m.style, { left:x+'px', top:y+'px', width:w+'px', height:h+'px' }); m.hidden = false;
+    const a = toWorld(x,y), b = toWorld(x+w,y+h);
+    sel = new Set(act.base);
+    B.nodes.forEach(n => { if (n.x < b.x && n.x+n.w > a.x && n.y < b.y && n.y+nodeH(n) > a.y) sel.add(n.id); });
+    syncSel();
+  }
+});
+const endTouch = e => { touches.delete(e.pointerId); if (touches.size < 2 && pinch){ pinch = null; scheduleSave(true); } };
+addEventListener('pointercancel', e => { endTouch(e); if (act){ act = null; tempWire = null; document.body.classList.remove('dragging'); vp.classList.remove('panning'); renderWires(); } });
+addEventListener('pointerup', e => {
+  endTouch(e);
+  if (!act) return;
+  const a = act; act = null;
+  document.body.classList.remove('dragging'); vp.classList.remove('panning');
+  if (a.type==='pan'){ if (!a.moved && a.clear){ sel.clear(); selEdge = null; syncSel(); renderWires(); } scheduleSave(true); }
+  if (a.type==='drag'){ if (a.moved) scheduleSave(); else if (a.toggle){ sel.delete(a.id); syncSel(); } }
+  if (a.type==='resize'){ scheduleSave(); }
+  if (a.type==='connect'){
+    document.querySelectorAll('.node.drop-ok').forEach(x => x.classList.remove('drop-ok'));
+    const t = targetFor(e, a); tempWire = null;
+    if (t){
+      const l = linkFor(a.n, a.role, t);
+      if (l.auto){ const ed = createEdit(l.to, null); addEdge(l.from.id, ed.id); toast('Referans için bir düzenleme kartı açıldı. İstersen ne değişeceğini yaz, sonra Renderla.', 4500); }
+      else addEdge(l.from.id, l.to.id);
+    }
+    else if (a.moved && isSrcNode(a.n) && !document.elementFromPoint(e.clientX, e.clientY)?.closest('.node')){
+      const w = toWorld(e.clientX, e.clientY);
+      if (a.role==='down'){
+        if (a.n.type==='result' && a.n.status!=='done') toast('Önce bu render bitsin');
+        else { const ed = createEdit(a.n, null); ed.x = w.x - ed.w/2; ed.y = w.y; placeNode(ed); }
+      } else newPromptFor(a.n, w.x - PR_W - 10, w.y - PORT_Y);
+    }
+    renderWires();
+  }
+  if (a.type==='marq'){ $('#marq').hidden = true; }
+});
+function startPan(e, clear){ act = { type:'pan', sx:e.clientX, sy:e.clientY, vx:B.view.x, vy:B.view.y, clear, moved:false }; vp.classList.add('panning'); document.body.classList.add('dragging'); }
+function startDrag(e, id){
+  let toggle = false;
+  if (e.shiftKey){ if (sel.has(id)) toggle = true; else sel.add(id); }
+  else if (!sel.has(id)){ sel = new Set([id]); }
+  selEdge = null; syncSel(); renderWires();
+  const items = [...sel].map(N).filter(Boolean).map(n => { els.get(n.id).style.zIndex = ++zTop; return { n, x:n.x, y:n.y }; });
+  act = { type:'drag', sx:e.clientX, sy:e.clientY, items, id, toggle, moved:false };
+  document.body.classList.add('dragging');
+}
+function startResize(e, id){
+  const n = N(id), el = els.get(id), txt = n.type==='prompt' ? el.querySelector('.txt') : null;
+  act = { type:'resize', sx:e.clientX, sy:e.clientY, n, w0:n.w, th0: txt ? txt.offsetHeight : 0, txt, moved:false };
+  document.body.classList.add('dragging');
+}
+function startConnect(e, id, role){
+  const n = N(id);
+  const a = role==='out' ? { x:n.x+n.w, y:n.y+PORT_Y } : role==='down' ? { x:n.x+n.w/2, y:n.y+nodeH(n) } : role==='top' ? { x:n.x+n.w/2, y:n.y } : { x:n.x, y:n.y+PORT_Y };
+  tempWire = { a, b:{...a}, role, color: (n.type==='prompt' || n.type==='edit' || n.type==='result') ? colorOf(n) : n.type==='ref' ? '#a87a45' : '#6b7078' };
+  act = { type:'connect', sx:e.clientX, sy:e.clientY, n, role, moved:false };
+  document.body.classList.add('dragging');
+}
+const isSrcNode = x => x && (x.type==='image' || x.type==='result');
+function linkFor(src, role, t){
+  if (!t || t===src) return null;
+  if (src.type==='prompt' && role==='out' && isSrcNode(t)) return { from:src, to:t };
+  if ((src.type==='prompt' || src.type==='edit') && role==='in' && t.type==='ref') return { from:t, to:src };
+  if (isSrcNode(src) && role==='in' && t.type==='prompt') return { from:t, to:src };
+  if (isSrcNode(src) && role==='down' && t.type==='edit') return { from:src, to:t };
+  if (src.type==='edit' && role==='top' && isSrcNode(t)) return { from:t, to:src };
+  if (src.type==='ref' && (t.type==='prompt' || t.type==='edit')) return { from:src, to:t };
+  if (src.type==='ref' && t.type==='result' && t.status==='done') return { auto:'edit', from:src, to:t };
+  return null;
+}
+function targetFor(e, a = act){
+  if (!a || a.type!=='connect') return null;
+  const el = document.elementFromPoint(e.clientX, e.clientY)?.closest('.node'); if (!el) return null;
+  const t = N(el.dataset.id);
+  return linkFor(a.n, a.role, t) ? t : null;
+}
+function startMarquee(e){ act = { type:'marq', sx:e.clientX, sy:e.clientY, base:[...sel] }; document.body.classList.add('dragging'); }
+function syncSel(){ els.forEach((el,id) => el.classList.toggle('sel', sel.has(id))); }
+
+vp.addEventListener('wheel', e => {
+  const ta = e.target.closest('textarea, .fullp');
+  if (ta && !e.ctrlKey && ta.scrollHeight > ta.clientHeight + 1) return;
+  e.preventDefault();
+  let dy = e.deltaY * (e.deltaMode===1 ? 33 : e.deltaMode===2 ? 400 : 1);
+  zoomAt(e.clientX, e.clientY, B.view.z * Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0016)));
+}, { passive:false });
+
+addEventListener('keydown', e => {
+  const inField = e.target.closest && e.target.closest('input,textarea,select');
+  if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='s'){ e.preventDefault(); saveNow(true); return; }
+  if (!$('#lb').hidden){
+    if (e.key==='Escape') closeLightbox();
+    if (e.key==='ArrowLeft') lbStep(-1);
+    if (e.key==='ArrowRight') lbStep(1);
+    if (e.key.toLowerCase()==='k') lbToggleSrc();
+    return;
+  }
+  if (!$('#paint').hidden){
+    if (e.key==='Escape') closePaint();
+    if (e.key==='Enter' && !inField) applyPaint();
+    if (!inField){
+      if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='z'){ e.preventDefault(); pUndo(); return; }
+      if (!e.ctrlKey && !e.metaKey){ const k = e.key.toLowerCase(); if (k==='w') setTool('wand'); if (k==='b') setTool('mask'); if (k==='e') setTool('erase'); }
+      if (e.key===' '){ e.preventDefault(); if (!pSpace){ pSpace = true; pSyncCursor(); } }
+      if (e.key==='+' || e.key==='=') pZoomAt(...pCenter(), pV.z*1.4);
+      if (e.key==='-') pZoomAt(...pCenter(), pV.z/1.4);
+      if (e.key==='0'){ pV = { x:0, y:0, z:1 }; pApply(); }
+    }
+    return;
+  }
+  if (!$('#crop').hidden){
+    if (e.key==='Escape') closeCrop();
+    if (e.key==='Enter' && !inField) applyCrop();
+    return;
+  }
+  if (e.key==='Escape' && !$('#varpop').hidden){ closeVarPop(); return; }
+  if (inField) { if (e.key==='Escape') e.target.blur(); return; }
+  if (e.key===' ' && !spaceDown){ spaceDown = true; document.body.classList.add('space'); e.preventDefault(); }
+  if (e.key==='Delete' || e.key==='Backspace'){
+    if (selEdge){ removeEdge(selEdge); }
+    else if (sel.size){ deleteNodes([...sel]); }
+    e.preventDefault();
+  }
+  if (e.key==='Escape'){ sel.clear(); selEdge = null; syncSel(); renderWires(); closeDrawers(); }
+  if (e.key==='!' || (e.shiftKey && e.code==='Digit1')) fitView();
+  if (e.key==='0' && (e.ctrlKey||e.metaKey)){ e.preventDefault(); zoomAt(innerWidth/2, innerHeight/2, 1); }
+  if (e.key==='+' || e.key==='=') zoomAt(innerWidth/2, innerHeight/2, B.view.z*1.2);
+  if (e.key==='-') zoomAt(innerWidth/2, innerHeight/2, B.view.z/1.2);
+  if (e.key.toLowerCase()==='p' && !e.ctrlKey && !e.metaKey) addPromptAtCenter();
+  if (e.key.toLowerCase()==='i' && !e.ctrlKey && !e.metaKey) $('#fileIn').click();
+  if (e.key.toLowerCase()==='r' && !e.ctrlKey && !e.metaKey){ refTarget = null; refIn.click(); }
+  if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='a'){ e.preventDefault(); sel = new Set(B.nodes.map(n=>n.id)); syncSel(); }
+});
+addEventListener('keyup', e => { if (e.key===' ' && pSpace){ pSpace = false; pSyncCursor(); } if (e.key===' '){ spaceDown = false; document.body.classList.remove('space'); } });
+addEventListener('blur', () => { spaceDown = false; document.body.classList.remove('space'); });
+
+/* ================= graph operations ================= */
+function metaFor(...ids){ ids.forEach(id => { const n = N(id); if (!n) return;
+  if (n.type==='prompt'){ updatePromptMeta(n); renderOpts(n); }
+  if (n.type==='edit'){ updateEditMeta(n); renderPaintBox(n); refreshRefsOf(n); }
+  if (n.type==='ref') renderRefSurf(n); }); }
+function addEdge(from, to){
+  if (B.edges.some(e => e.from===from && e.to===to)) return;
+  B.edges.push({ id:uid(), from, to });
+  metaFor(from, to); renderWires(); scheduleSave();
+}
+function removeEdge(id){
+  const e = B.edges.find(x => x.id===id); if (!e) return;
+  B.edges = B.edges.filter(x => x.id!==id); if (selEdge===id) selEdge = null;
+  metaFor(e.from, e.to);
+  renderWires(); scheduleSave();
+}
+function deleteNodes(ids){
+  const set = new Set(ids);
+  B.nodes.filter(n => set.has(n.id) && isSrcNode(n)).forEach(n => {
+    const nm = nameOf(n);
+    B.nodes.forEach(r => { if (r.type==='result' && r.imageId===n.id) r.imageName = nm; });
+  });
+  B.nodes = B.nodes.filter(n => !set.has(n.id));
+  B.edges = B.edges.filter(e => !set.has(e.from) && !set.has(e.to));
+  set.forEach(id => { els.get(id)?.remove(); els.delete(id); sel.delete(id); });
+  queue = queue.filter(id => !set.has(id));
+  B.nodes.filter(n => n.type==='prompt').forEach(n => updatePromptMeta(n));
+  B.nodes.filter(n => n.type==='result').forEach(n => updateResult(n));
+  B.nodes.filter(n => n.type==='ref').forEach(n => renderRefSurf(n));
+  B.nodes.filter(n => n.type==='edit').forEach(n => { updateEditMeta(n); renderPaintBox(n); });
+  renderWires(); updateEmpty(); updateQueueUI(); scheduleSave();
+}
+function overlaps(x, y, w, h, skip){
+  const sk = Array.isArray(skip) ? skip : [skip];
+  return B.nodes.find(n => !sk.includes(n) && n.x < x+w+16 && n.x+n.w+16 > x && n.y < y+h+16 && n.y+nodeH(n)+16 > y);
+}
+function freeSpot(x, y, w, h, skip){
+  for (let i = 0; i < 80; i++){ const o = overlaps(x, y, w, h, skip); if (!o) break; y = o.y + nodeH(o) + 30; }
+  return { x, y };
+}
+// a new main prompt card wired to an image or render (dropping a wire from the left port on empty canvas)
+function newPromptFor(src, x, y){
+  const cat = src.cat || 'facade';
+  const pos = freeSpot(x, y, PR_W, 560);
+  const p = makePrompt(pos.x, pos.y, { cat, opts:{ ...DEF_OPTS, ...(src.opts||{}) } });
+  B.edges.push({ id:uid(), from:p.id, to:src.id });
+  buildNode(p); sel = new Set([p.id]); syncSel(); renderWires(); scheduleSave();
+  ensureVisible([p, src]);
+  return p;
+}
+function presetText(v){
+  if (v[0]==='people') return 'Change the scene: ' + PEOPLE_EXT[3] + ' Keep every person at correct scale and anatomically natural.';
+  const [k, val] = Object.entries(v[3])[0];
+  const g = OPTS.find(x => x.k===k), it = g && g.items.find(i => i[0]===val);
+  return it ? 'Change the scene: ' + it[3] : v[1];
+}
+// edit card: a step that changes an existing render (or input image). Branches = several edit cards from one render.
+function createEdit(src, preset){
+  const pos = freeSpot(src.x, src.y + nodeH(src) + 50, EDIT_W, 300, src);
+  const e = { id:uid(), type:'edit', x:pos.x, y:pos.y, w:EDIT_W, letter:'D' + (++B.editSeq), ci: src.ci ?? 0,
+    title: preset ? preset[1] : '', text: preset ? presetText(preset) : '', lock: src.lock ?? true, q:{},
+    camFree: !!(preset && preset[3].shot && CAMERA_FREE.has(preset[3].shot)), variants:1 };
+  B.nodes.push(e); B.edges.push({ id:uid(), from:src.id, to:e.id });
+  buildNode(e); sel = new Set([e.id]); syncSel(); renderWires(); scheduleSave();
+  ensureVisible([src, e]);
+  if (!preset) setTimeout(() => els.get(e.id)?.querySelector('.etxt')?.focus({ preventScroll:true }), 40);
+  return e;
+}
+function addPromptAtCenter(){
+  const c = viewCenter();
+  const n = makePrompt(c.x - PR_W/2, c.y - 160);
+  buildNode(n); sel = new Set([n.id]); syncSel(); renderWires(); scheduleSave();
+  setTimeout(() => els.get(n.id)?.querySelector('.txt').focus({ preventScroll:true }), 30);
+}
+function duplicatePrompt(p){
+  const n = makePrompt(p.x, p.y + nodeH(p) + 30, { cat:p.cat, text:p.text, variants:p.variants, opts:{ ...p.opts }, lock:p.lock });
+  n.th = p.th;
+  B.edges.filter(e => e.from===p.id).forEach(e => B.edges.push({ id:uid(), from:n.id, to:e.to }));
+  B.edges.filter(e => e.to===p.id).forEach(e => B.edges.push({ id:uid(), from:e.from, to:n.id }));
+  buildNode(n); sel = new Set([n.id]); syncSel(); renderWires(); scheduleSave();
+  toast(`Alternatif ${n.letter} oluşturuldu — promptu değiştirip renderla`);
+}
+
+/* ================= images in ================= */
+const fileIn = $('#fileIn');
+$('#addImg').onclick = () => fileIn.click();
+$('#emptyPick').onclick = () => fileIn.click();
+fileIn.onchange = () => { addFiles(fileIn.files, null); fileIn.value = ''; };
+let dragDepth = 0;
+addEventListener('dragenter', e => { if ([...(e.dataTransfer?.types||[])].includes('Files')){ dragDepth++; vp.classList.add('fileover'); } });
+addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth-1); if (!dragDepth) vp.classList.remove('fileover'); });
+addEventListener('dragover', e => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; });
+const isImg = f => !!f && ((f.type||'').startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|avif|tiff?)$/i.test(f.name||''));
+function filesFrom(dt){
+  if (!dt) return [];
+  let fs = [...(dt.files||[])];
+  if (!fs.length) fs = [...(dt.items||[])].filter(i => i.kind==='file').map(i => i.getAsFile()).filter(Boolean);
+  return fs;
+}
+addEventListener('drop', e => {
+  e.preventDefault(); dragDepth = 0; vp.classList.remove('fileover');
+  const fs = filesFrom(e.dataTransfer);
+  if (!fs.length) return toast('Görseli bilgisayarındaki bir klasörden ya da masaüstünden sürükle. Başka bir web sayfasından sürüklenen görseller alınamıyor; onun yerine kopyalayıp Ctrl+V yap.', 6000);
+  addFiles(fs, toWorld(e.clientX, e.clientY));
+});
+addEventListener('paste', e => {
+  const fs = filesFrom(e.clipboardData).filter(isImg);
+  if (fs.length){ e.preventDefault(); addFiles(fs, null); return; }
+  if (e.target.closest && e.target.closest('input,textarea')) return;
+  toast('Panoda görsel yok. Ekran görüntüsünü kopyalayıp tekrar Ctrl+V yap.');
+});
+
+async function addFiles(list, at){
+  const all = [...list], files = all.filter(isImg);
+  if (!files.length) return toast(all.length ? `Bu dosya türü desteklenmiyor: ${all[0].name || all[0].type}. PNG, JPG veya WEBP kullan.` : 'Dosya seçilmedi');
+  // auto-connect target: a single selected prompt, or the only prompt on the board
+  const selPrompts = [...sel].map(N).filter(n => n && n.type==='prompt');
+  const prompts = B.nodes.filter(n => n.type==='prompt');
+  const target = selPrompts.length===1 ? selPrompts[0] : (prompts.length===1 ? prompts[0] : null);
+  let pos = at ? { x: at.x - IMG_W/2, y: at.y - 40 } : nextImageSlot();
+  const added = [];
+  for (const f of files){
+    try{
+      const p = await prepImage(f, +$('#maxSide').value);
+      const n = { id:uid(), type:'image', x:pos.x, y:pos.y, w:IMG_W,
+        name: (f.name && !/^image\.(png|jpe?g)$/i.test(f.name)) ? f.name.replace(/\.[^.]+$/,'') : 'Görünüm ' + (B.nodes.filter(x=>x.type==='image').length+1),
+        note:'', ...p };
+      B.nodes.push(n); buildNode(n); added.push(n);
+      if (target) B.edges.push({ id:uid(), from:target.id, to:n.id });
+      pos = { x:pos.x, y:pos.y + nodeH(n) + 40 };
+    }catch(err){ toast(`${f.name||'Görsel'} açılamadı. Tarayıcı bu formatı çözemiyor; PNG veya JPG olarak kaydedip tekrar dene.`, 6000); }
+  }
+  if (target) updatePromptMeta(target);
+  renderWires(); updateEmpty(); scheduleSave();
+  if (added.length){
+    sel = new Set(added.map(n=>n.id)); syncSel();
+    if (target) toast(`${added.length} görsel ${target.letter} promptuna bağlandı`);
+    if (!at) ensureVisible(added);
+  }
+}
+function nextImageSlot(){
+  const imgs = B.nodes.filter(n => n.type==='image'), prs = B.nodes.filter(n => n.type==='prompt');
+  if (imgs.length){ const last = imgs.reduce((a,b) => (b.y+nodeH(b) > a.y+nodeH(a) ? b : a)); return { x:last.x, y:last.y + nodeH(last) + 40 }; }
+  if (prs.length){ const b = bbox(prs); return { x:b.x2 + 140, y:b.y1 }; }
+  const c = viewCenter(); return { x:c.x - IMG_W/2, y:c.y - 120 };
+}
+function ensureVisible(nodes){
+  const b = bbox(nodes), v = B.view;
+  const sx1 = b.x1*v.z+v.x, sy1 = b.y1*v.z+v.y, sx2 = b.x2*v.z+v.x, sy2 = b.y2*v.z+v.y;
+  if (sx1 > 0 && sy1 > 60 && sx2 < innerWidth && sy2 < innerHeight-70) return;
+  fitView();
+}
+function prepImage(file, maxSide){
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      let w = img.naturalWidth, h = img.naturalHeight; const s = Math.min(1, maxSide/Math.max(w,h));
+      w = Math.round(w*s); h = Math.round(h*s);
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0,0,w,h); ctx.drawImage(img,0,0,w,h);
+      URL.revokeObjectURL(url);
+      res({ src: c.toDataURL('image/jpeg', 0.93), mime:'image/jpeg', iw:w, ih:h });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(); };
+    img.src = url;
+  });
+}
+
+/* ================= references ================= */
+const refIn = $('#refIn'); let refTarget = null;
+$('#addRef').onclick = () => { refTarget = null; refIn.click(); };
+refIn.onchange = async () => {
+  const fs = [...refIn.files].filter(isImg); refIn.value = '';
+  if (!fs.length) return;
+  if (refTarget){ // replace image of an existing reference card
+    try{ const p = await prepImage(fs[0], +$('#maxSide').value); Object.assign(refTarget, p, { orig:p.src, crop:null }); rebuildNode(refTarget); scheduleSave(); openCrop(refTarget); }
+    catch(e){ toast('Görsel açılamadı'); }
+    refTarget = null; return;
+  }
+  addRefs(fs);
+};
+async function addRefs(files){
+  const selCards = [...sel].map(N).filter(n => n && (n.type==='prompt' || n.type==='edit'));
+  const prompts = B.nodes.filter(n => n.type==='prompt');
+  const target = selCards.length===1 ? selCards[0] : (prompts.length===1 && !B.nodes.some(n => n.type==='edit') ? prompts[0] : null);
+  const W = 220, added = [];
+  for (const f of files){
+    try{
+      const p = await prepImage(f, +$('#maxSide').value);
+      const start = target ? { x: target.x - W - 90, y: target.y } : (() => { const c = viewCenter(); return { x:c.x - W/2, y:c.y - 120 }; })();
+      const pos = freeSpot(start.x, start.y, W, 44 + W*p.ih/p.iw + 130);
+      const n = { id:uid(), type:'ref', x:pos.x, y:pos.y, w:W, name: (f.name||'Referans').replace(/\.[^.]+$/,''), surf:[], note:'', ...p, orig:p.src, crop:null };
+      B.nodes.push(n); buildNode(n); added.push(n);
+      if (target) B.edges.push({ id:uid(), from:n.id, to:target.id });
+    }catch(e){ toast(`${f.name||'Görsel'} açılamadı`); }
+  }
+  if (target) metaFor(target.id);
+  renderWires(); updateEmpty(); scheduleSave();
+  if (!added.length) return;
+  ensureVisible(added);
+  toast(target ? `Referans ${target.letter} kartına bağlandı. Nerede kullanılacağını seç, gerekirse Kırp ile sadece malzemeyi bırak.` : 'Referansı bir prompt ya da düzenleme kartının solundaki noktaya, ya da doğrudan bir render\'a bağla.', 5000);
+  if (added.length===1) openCrop(added[0]);
+}
+
+// crop modal
+let cropN = null, cropR = null, cropDrag = null;
+const cropImg = $('#cropImg'), cropBox = $('#cropBox'), cropWrap = $('#cropWrap');
+function openCrop(n){ cropN = n; cropR = n.crop ? { ...n.crop } : null; cropImg.onload = drawCrop; cropImg.src = n.orig || n.src; $('#crop').hidden = false; drawCrop(); }
+function closeCrop(){ $('#crop').hidden = true; cropN = null; }
+function drawCrop(){
+  if (!cropR || cropR.w < 0.01 || cropR.h < 0.01){ cropBox.hidden = true; return; }
+  const W = cropImg.clientWidth, H = cropImg.clientHeight;
+  Object.assign(cropBox.style, { left: cropR.x*W+'px', top: cropR.y*H+'px', width: cropR.w*W+'px', height: cropR.h*H+'px' }); cropBox.hidden = false;
+}
+const cropPt = e => { const r = cropImg.getBoundingClientRect(); return { x: Math.min(1, Math.max(0, (e.clientX - r.left)/r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top)/r.height)) }; };
+cropWrap.addEventListener('pointerdown', e => { e.preventDefault(); cropWrap.setPointerCapture(e.pointerId); cropDrag = cropPt(e); cropR = { ...cropDrag, w:0, h:0 }; drawCrop(); });
+cropWrap.addEventListener('pointermove', e => { if (!cropDrag) return; const q = cropPt(e); cropR = { x:Math.min(cropDrag.x,q.x), y:Math.min(cropDrag.y,q.y), w:Math.abs(q.x-cropDrag.x), h:Math.abs(q.y-cropDrag.y) }; drawCrop(); });
+cropWrap.addEventListener('pointerup', () => { cropDrag = null; });
+addEventListener('resize', () => { if (!$('#crop').hidden) drawCrop(); });
+$('#cropCancel').onclick = closeCrop;
+$('#cropAll').onclick = () => { cropR = null; applyCrop(); };
+$('#cropOk').onclick = () => applyCrop();
+function applyCrop(){
+  const n = cropN; if (!n) return closeCrop();
+  const im = new Image();
+  im.onload = () => {
+    const r = (cropR && cropR.w > 0.02 && cropR.h > 0.02) ? cropR : null;
+    const sx = r ? Math.round(r.x*im.naturalWidth) : 0, sy = r ? Math.round(r.y*im.naturalHeight) : 0;
+    const sw = r ? Math.max(8, Math.round(r.w*im.naturalWidth)) : im.naturalWidth, sh = r ? Math.max(8, Math.round(r.h*im.naturalHeight)) : im.naturalHeight;
+    const c = document.createElement('canvas'); c.width = sw; c.height = sh;
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0,0,sw,sh); ctx.drawImage(im, sx, sy, sw, sh, 0, 0, sw, sh);
+    Object.assign(n, { src: c.toDataURL('image/jpeg', 0.93), mime:'image/jpeg', iw:sw, ih:sh, crop: r });
+    rebuildNode(n); scheduleSave(); closeCrop(); refreshPromptsOf(n);
+    toast(r ? 'Referans kırpıldı' : 'Görselin tamamı kullanılıyor');
+  };
+  im.src = n.orig || n.src;
+}
+
+/* ================= variation popover ================= */
+const varpop = $('#varpop');
+function openVarPop(r, btn){
+  const cat = r.cat || N(r.promptId)?.cat || 'facade';
+  const hidden = new Set(OPTS.filter(g => !optVisible(g, cat)).map(g => g.k));
+  varpop.innerHTML = '<div class="vtitle">Seçtiğin değişiklik için bir düzenleme kartı açılır.</div>';
+  VARS.filter(v => !Object.keys(v[3]).some(k => hidden.has(k)) && !(cat==='furniture' && ['detail','people'].includes(v[0]))).forEach(v => {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'vb'; b.innerHTML = v[2] + '<span></span>';
+    b.lastChild.textContent = v[1]; b.onclick = () => { closeVarPop(); createEdit(r, v); toast(`“${v[1]}” düzenleme kartı hazır. Kontrol edip Renderla'ya bas.`, 3500); };
+    varpop.appendChild(b);
+  });
+  if (cat==='furniture'){
+    const FV = [
+      ['Renk / malzeme ×3', IC.real, 'Show the same furniture piece in a different color and material combination (colorway). Keep the exact form, proportions, details, camera and background. Make each version clearly different from the others.', 3, false],
+      ['Detay yakın plan', IC.detail, 'Create a close-up detail shot of this furniture piece focusing on its joints, edges and material surfaces, with a shallow depth of field.', 1, true],
+      ['Sahnede kullanım', IC.people, 'Show this exact furniture piece in use inside a fitting contemporary interior, with a person naturally using it. Keep the piece identical in form, materials and proportions.', 1, true]
+    ];
+    FV.forEach(([lbl, icon, text, variants, cam]) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'vb'; b.innerHTML = icon + '<span></span>'; b.lastChild.textContent = lbl;
+      b.onclick = () => { closeVarPop(); const ed = createEdit(r, null); Object.assign(ed, { title: lbl, text, variants, camFree: cam }); rebuildNode(ed); updateFull(ed); scheduleSave();
+        toast(`“${lbl}” düzenleme kartı hazır${variants>1 ? `, ×${variants} render alacak` : ''}. Kontrol edip Renderla'ya bas.`, 3500); };
+      varpop.appendChild(b);
+    });
+  }
+  const fx = document.createElement('button'); fx.type = 'button'; fx.className = 'vb wide'; fx.innerHTML = IC.people + '<span>Son dokunuş: yüz, el, yazı düzeltme</span>';
+  fx.onclick = () => {
+    closeVarPop(); const ed = createEdit(r, null);
+    ed.title = 'Son dokunuş'; ed.text = FIX_TEXT; rebuildNode(ed); updateFull(ed); scheduleSave();
+    toast('Son dokunuş kartı hazır. En iyi sonuç için Fırça ile sadece bozuk yüzleri boya, sonra Renderla.', 5500);
+  };
+  varpop.appendChild(fx);
+  const f = document.createElement('button'); f.type = 'button'; f.className = 'vb wide'; f.innerHTML = ICON.pen + '<span>Fırça / eskiz ile düzenle</span>';
+  f.onclick = () => { closeVarPop(); const ed = createEdit(r, null); openPaint(ed); };
+  varpop.appendChild(f);
+  varpop.hidden = false;
+  const br = btn.getBoundingClientRect(), H = varpop.offsetHeight, W = varpop.offsetWidth;
+  let top = br.bottom + 6; if (top + H > innerHeight - 8) top = Math.max(8, br.top - H - 6);
+  varpop.style.left = Math.min(innerWidth - W - 8, Math.max(8, br.left)) + 'px'; varpop.style.top = top + 'px';
+}
+function closeVarPop(){ varpop.hidden = true; }
+addEventListener('pointerdown', e => { if (!varpop.hidden && !varpop.contains(e.target) && !e.target.closest('.vary')) closeVarPop(); }, true);
+
+/* ================= painter: brush mask + sketch ================= */
+let pE = null, pIn = null, pTool = 'mask', pColor = '#ffffff', pLast = null;
+const pImg = $('#pImg'), pMask = $('#pMask'), pSk = $('#pSk'), pWrap = $('#pWrap');
+const P_HINT = { wand:'Değnek: benzer renkli alana dokun, tek seferde seçilir. Fazlasını Çıkar ile al, toleransla ayarla.', mask:'Fırça: değişecek alanı boya. Sadece bu alan değişir, geri kalan aynen kalır.', sketch:'Eskiz: eklemek ya da değiştirmek istediğin şeyi kabaca çiz. Model çizgiyi gerçek bir öğeye çevirir.', erase:'Silgi: boyayı ve eskizi siler.', pan:'Kaydır: görseli sürükleyerek gez.' };
+const P_ZOOM_TIP = ' · Tekerlek ya da iki parmak: yakınlaştır · Boşluk + sürükle: kaydır · 0: sığdır';
+const pStage = $('#pStage'); let pV = { x:0, y:0, z:1 }, pSpace = false, pPan = null; const pTouch = new Map(); let pPinch = null;
+function pApply(){ pWrap.style.transform = `translate(${pV.x}px,${pV.y}px) scale(${pV.z})`; $('#pZLbl').textContent = Math.round(pV.z*100) + '%'; }
+function pZoomAt(cx, cy, nz){
+  nz = Math.max(1, Math.min(12, nz));
+  const r = pWrap.getBoundingClientRect(), left0 = r.left - pV.x, top0 = r.top - pV.y;
+  const ux = (cx - r.left)/pV.z, uy = (cy - r.top)/pV.z;
+  pV.z = nz; pV.x = cx - left0 - ux*nz; pV.y = cy - top0 - uy*nz;
+  if (nz===1){ pV.x = 0; pV.y = 0; }
+  pApply();
+}
+const pCenter = () => { const r = pStage.getBoundingClientRect(); return [r.left + r.width/2, r.top + r.height/2]; };
+$('#pZIn').onclick = () => pZoomAt(...pCenter(), pV.z*1.4);
+$('#pZOut').onclick = () => pZoomAt(...pCenter(), pV.z/1.4);
+$('#pZLbl').onclick = () => { pV = { x:0, y:0, z:1 }; pApply(); };
+pStage.addEventListener('wheel', ev => { ev.preventDefault(); const dy = ev.deltaY * (ev.deltaMode===1 ? 33 : 1); pZoomAt(ev.clientX, ev.clientY, pV.z * Math.exp(-dy * (ev.ctrlKey ? 0.01 : 0.002))); }, { passive:false });
+const pPanMode = () => pTool==='pan' || pSpace;
+function pSyncCursor(){ pStage.classList.toggle('pan', pPanMode()); }
+function loadTo(c, url){ return new Promise(res => { const im = new Image(); im.onload = () => { c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); res(); }; im.onerror = res; im.src = url; }); }
+function setTool(t){ pTool = t; document.querySelectorAll('#pTools .tb').forEach(b => b.classList.toggle('on', b.dataset.tool===t)); $('#pSw').style.visibility = t==='sketch' ? 'visible' : 'hidden';
+  $('#pWandOpts').hidden = t!=='wand'; $('#pSizeL').hidden = t==='wand' || t==='pan'; $('#pHint').textContent = P_HINT[t] + P_ZOOM_TIP; pSyncCursor(); }
+document.querySelectorAll('#pTools .tb').forEach(b => b.onclick = () => setTool(b.dataset.tool));
+document.querySelectorAll('#pSw button').forEach(b => b.onclick = () => { pColor = b.dataset.c; document.querySelectorAll('#pSw button').forEach(x => x.classList.toggle('on', x===b)); if (pTool!=='sketch') setTool('sketch'); });
+function openPaint(e){
+  const input = inputsOf(e).find(i => i.src);
+  if (!input) return toast('Önce bu düzenleme kartını bitmiş bir render\'a bağla');
+  pE = e; pIn = input;
+  pImg.onload = async () => {
+    const W = pImg.naturalWidth, H = pImg.naturalHeight;
+    [pMask, pSk].forEach(c => { c.width = W; c.height = H; c.getContext('2d').clearRect(0, 0, W, H); });
+    if (paintFits(e, { id:input.id, iw:W, ih:H })){ if (e.maskPaint) await loadTo(pMask, e.maskPaint); if (e.sketch) await loadTo(pSk, e.sketch); }
+  };
+  pV = { x:0, y:0, z:1 }; pApply();
+  pHist = []; pPix = null;
+  pImg.src = input.src; $('#paint').hidden = false; setTool(e.sketch && !e.mask ? 'sketch' : 'mask');
+}
+// ---- undo history (mask + sketch snapshots)
+let pHist = [];
+function pSnap(){ try{ pHist.push([pMask, pSk].map(c => c.getContext('2d').getImageData(0, 0, c.width, c.height))); if (pHist.length > 25) pHist.shift(); }catch(e){} }
+function pUndo(){ const h = pHist.pop(); if (!h) return toast('Geri alınacak adım yok'); [pMask, pSk].forEach((c, i) => c.getContext('2d').putImageData(h[i], 0, 0)); }
+$('#pUndo').onclick = pUndo;
+// ---- magic wand
+let pWMode = 'add', pPix = null;
+$('#pWAdd').onclick = () => { pWMode = 'add'; $('#pWAdd').classList.add('on'); $('#pWSub').classList.remove('on'); };
+$('#pWSub').onclick = () => { pWMode = 'sub'; $('#pWSub').classList.add('on'); $('#pWAdd').classList.remove('on'); };
+$('#pTol').oninput = () => { $('#pTolV').textContent = $('#pTol').value; };
+function pPixels(){
+  if (pPix && pPix.w===pMask.width && pPix.h===pMask.height && pPix.src===pImg.src) return pPix;
+  const c = document.createElement('canvas'); c.width = pMask.width; c.height = pMask.height;
+  const g = c.getContext('2d'); g.drawImage(pImg, 0, 0, c.width, c.height);
+  pPix = { w:c.width, h:c.height, src:pImg.src, d:g.getImageData(0, 0, c.width, c.height).data }; return pPix;
+}
+function wandSelect(pt, mode){
+  const { w, h, d } = pPixels();
+  const x0 = Math.floor(pt.x), y0 = Math.floor(pt.y); if (x0<0 || y0<0 || x0>=w || y0>=h) return;
+  const i0 = (y0*w + x0)*4, r0 = d[i0], g0 = d[i0+1], b0 = d[i0+2];
+  const tol = +$('#pTol').value, lim = tol*tol + 1;   // like Photoshop: max color difference on a 0–255 scale
+  const near = i => { const dr = d[i]-r0, dg = d[i+1]-g0, db = d[i+2]-b0; return dr*dr*0.3 + dg*dg*0.59 + db*db*0.11 <= lim; };
+  const sel = new Uint8Array(w*h);
+  if ($('#pContig').checked){
+    const st = [y0*w + x0]; sel[st[0]] = 1;
+    while (st.length){
+      const p = st.pop(), x = p % w, y = (p - x)/w;
+      const nb = [x>0 ? p-1 : -1, x<w-1 ? p+1 : -1, y>0 ? p-w : -1, y<h-1 ? p+w : -1];
+      for (const q of nb){ if (q>=0 && !sel[q] && near(q*4)){ sel[q] = 1; st.push(q); } }
+    }
+  } else { for (let p = 0; p < w*h; p++) if (near(p*4)) sel[p] = 1; }
+  // grow the selection by ~2px so the model gets a little margin at the edges
+  const grow = Math.max(1, Math.round(Math.min(w, h)/600));
+  let cur = sel;
+  for (let k = 0; k < grow; k++){
+    const nx = cur.slice();
+    for (let p = 0; p < w*h; p++) if (cur[p]){ const x = p % w; if (x>0) nx[p-1] = 1; if (x<w-1) nx[p+1] = 1; if (p>=w) nx[p-w] = 1; if (p<w*h-w) nx[p+w] = 1; }
+    cur = nx;
+  }
+  const g = pMask.getContext('2d'), img = g.getImageData(0, 0, w, h), m = img.data;
+  let n = 0;
+  for (let p = 0; p < w*h; p++) if (cur[p]){ n++; const i = p*4;
+    if (mode==='sub'){ m[i+3] = 0; } else { m[i] = 255; m[i+1] = 59; m[i+2] = 59; m[i+3] = 255; } }
+  g.putImageData(img, 0, 0);
+  if (!n) toast('Seçilecek alan bulunamadı; toleransı artır');
+}
+function closePaint(){ pHist = []; $('#paint').hidden = true; pE = null; pLast = null; pPan = null; pPinch = null; pTouch.clear(); pSpace = false; pSyncCursor(); }
+const pPt = ev => { const r = pImg.getBoundingClientRect(); return { x:(ev.clientX - r.left)/r.width*pMask.width, y:(ev.clientY - r.top)/r.height*pMask.height }; };
+function pStroke(a, b){
+  const scale = pMask.width / pImg.getBoundingClientRect().width, lw = +$('#pSize').value * scale;
+  const targets = pTool==='erase' ? [pMask, pSk] : [pTool==='mask' ? pMask : pSk];
+  targets.forEach(c => {
+    const g = c.getContext('2d'); g.save();
+    g.globalCompositeOperation = pTool==='erase' ? 'destination-out' : 'source-over';
+    g.strokeStyle = pTool==='mask' ? '#ff3b3b' : pColor;
+    g.lineWidth = pTool==='sketch' ? Math.max(2, lw*0.3) : lw;
+    g.lineCap = g.lineJoin = 'round';
+    g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x + 0.01, b.y); g.stroke(); g.restore();
+  });
+}
+pStage.addEventListener('pointerdown', ev => {
+  ev.preventDefault(); pStage.setPointerCapture(ev.pointerId);
+  if (ev.pointerType==='touch'){
+    pTouch.set(ev.pointerId, { x:ev.clientX, y:ev.clientY });
+    if (pTouch.size===2){ pLast = null; pPan = null; const [a, b] = [...pTouch.values()]; pPinch = { d:Math.hypot(a.x-b.x, a.y-b.y), z:pV.z }; return; }
+  }
+  if (pPanMode() || ev.button===1){ pPan = { sx:ev.clientX, sy:ev.clientY, x:pV.x, y:pV.y }; pStage.classList.add('panning'); return; }
+  if (ev.button!==0) return;
+  pSnap();
+  if (pTool==='wand'){ wandSelect(pPt(ev), ev.altKey ? 'sub' : ev.shiftKey ? 'add' : pWMode); return; }
+  pLast = pPt(ev); pStroke(pLast, pLast);
+});
+pStage.addEventListener('pointermove', ev => {
+  if (pTouch.has(ev.pointerId)) pTouch.set(ev.pointerId, { x:ev.clientX, y:ev.clientY });
+  if (pPinch && pTouch.size>=2){ const [a, b] = [...pTouch.values()]; pZoomAt((a.x+b.x)/2, (a.y+b.y)/2, pPinch.z * Math.hypot(a.x-b.x, a.y-b.y) / pPinch.d); return; }
+  if (pPan){ pV.x = pPan.x + ev.clientX - pPan.sx; pV.y = pPan.y + ev.clientY - pPan.sy; if (pV.z===1){ pV.x = 0; pV.y = 0; } pApply(); return; }
+  if (!pLast) return; const q = pPt(ev); pStroke(pLast, q); pLast = q;
+});
+const pEnd = ev => { pTouch.delete(ev.pointerId); if (pTouch.size < 2) pPinch = null; pLast = null; pPan = null; pStage.classList.remove('panning'); };
+pStage.addEventListener('pointerup', pEnd);
+pStage.addEventListener('pointercancel', pEnd);
+$('#pClear').onclick = () => pSnap() || [pMask, pSk].forEach(c => c.getContext('2d').clearRect(0, 0, c.width, c.height));
+$('#pCancel').onclick = closePaint;
+$('#pOk').onclick = () => applyPaint();
+function hasInk(c){ const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 3; i < d.length; i += 16) if (d[i] > 8) return true; return false; }
+function applyPaint(){
+  const e = pE; if (!e || !pIn) return closePaint();
+  const W = pMask.width, H = pMask.height, m = hasInk(pMask), sk = hasInk(pSk);
+  let mask = null;
+  if (m){ const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
+    g.fillStyle = '#000'; g.fillRect(0, 0, W, H); g.globalCompositeOperation = 'destination-out'; g.drawImage(pMask, 0, 0); mask = c.toDataURL('image/png'); }
+  let preview = null;
+  if (m || sk){ const pw = Math.min(640, W), ph = Math.round(H*pw/W), c = document.createElement('canvas'); c.width = pw; c.height = ph; const g = c.getContext('2d');
+    g.drawImage(pImg, 0, 0, pw, ph); g.globalAlpha = .5; g.drawImage(pMask, 0, 0, pw, ph); g.globalAlpha = 1; g.drawImage(pSk, 0, 0, pw, ph); preview = c.toDataURL('image/jpeg', .85); }
+  Object.assign(e, { mask, maskPaint: m ? pMask.toDataURL('image/png') : null, sketch: sk ? pSk.toDataURL('image/png') : null, preview, paintFor:pIn.id, paintW:W, paintH:H });
+  closePaint(); renderPaintBox(e); renderQuick(e); updateFull(e); renderWires(); scheduleSave();
+  toast(m || sk ? 'Kaydedildi. Ne yapılacağını yaz, sonra Renderla.' : 'Boya ve eskiz temizlendi');
+}
+function compositeImg(base, layers){
+  return new Promise((res, rej) => {
+    const bi = new Image();
+    bi.onload = async () => {
+      const c = document.createElement('canvas'); c.width = bi.naturalWidth; c.height = bi.naturalHeight; const g = c.getContext('2d');
+      g.drawImage(bi, 0, 0);
+      for (const l of layers){ await new Promise(r2 => { const im = new Image(); im.onload = () => { g.globalAlpha = l.alpha; g.drawImage(im, 0, 0, c.width, c.height); g.globalAlpha = 1; r2(); }; im.onerror = r2; im.src = l.url; }); }
+      res(c.toDataURL('image/png'));
+    };
+    bi.onerror = rej; bi.src = base;
+  });
+}
+
+/* ================= API layer (OpenAI + Gemini) ================= */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const GEM_API = m => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`;
+async function callGemini(model, body, onRetry){
+  const key = keyFor('gemini');
+  if (!key) throw new Error('Gemini API anahtarı girilmedi. Ayarlar’dan ekle.');
+  let last;
+  for (let attempt = 0; attempt < 4; attempt++){
+    let resp;
+    try{ resp = await fetch(GEM_API(model), { method:'POST', headers:{ 'Content-Type':'application/json', 'x-goog-api-key':key }, body:JSON.stringify(body) }); }
+    catch(e){ last = new Error('Gemini’ye bağlanılamadı. İnternet bağlantını kontrol et.'); await sleep(2000); continue; }
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) return data;
+    const msg = data?.error?.message || resp.statusText;
+    if ([429,500,503].includes(resp.status) && attempt < 3){ last = new Error(explainGem(resp.status,msg)); onRetry && onRetry(); await sleep(4000*(attempt+1)); continue; }
+    throw new Error(explainGem(resp.status, msg));
+  }
+  throw last;
+}
+function explainGem(code, msg){
+  if (code===400 && /API key/i.test(msg)) return 'Gemini anahtarı geçersiz. AI Studio’dan kontrol et.';
+  if (code===403) return 'Erişim reddedildi (403). Anahtarın bu modele yetkisi yok ya da faturalandırma kapalı.\n' + msg;
+  if (code===404) return 'Model bulunamadı (404). Ayarlar’dan model adını kontrol et.\n' + msg;
+  if (code===429) return 'Kota doldu (429). Görüntü modelleri faturalandırma ister ya da biraz bekle.\n' + msg;
+  return `Hata ${code}: ${msg}`;
+}
+function extractGemImage(data){
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  for (const p of parts){ const d = p.inlineData || p.inline_data; if (d?.data) return { mime: d.mimeType || d.mime_type || 'image/png', b64: d.data }; }
+  const txt = parts.map(p => p.text).filter(Boolean).join(' ');
+  const reason = data?.candidates?.[0]?.finishReason || data?.promptFeedback?.blockReason;
+  throw new Error('Görüntü dönmedi' + (reason ? ` (${reason})` : '') + (txt ? `: ${txt.slice(0,300)}` : '.'));
+}
+
+async function callOpenAI(path, body, onRetry){
+  const key = keyFor('openai');
+  if (!key) throw new Error('OpenAI API anahtarı girilmedi. Ayarlar’dan ekle.');
+  let last;
+  for (let attempt = 0; attempt < 4; attempt++){
+    let resp;
+    try{ resp = await fetch('https://api.openai.com/v1/' + path, { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + key }, body:JSON.stringify(body) }); }
+    catch(e){ last = new Error('OpenAI’ye bağlanılamadı. İnternet bağlantını kontrol et.'); await sleep(2000); continue; }
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) return data;
+    const err = data?.error || {};
+    const retryable = (resp.status===429 && err.code!=='insufficient_quota') || [500,502,503].includes(resp.status);
+    if (retryable && attempt < 3){ last = new Error(explainOA(resp.status, err)); onRetry && onRetry(); await sleep(5000*(attempt+1)); continue; }
+    throw new Error(explainOA(resp.status, err));
+  }
+  throw last;
+}
+function explainOA(code, err){
+  const msg = err.message || '', c = err.code || '';
+  if (code===401) return 'OpenAI anahtarı reddetti (401). Ayarlar’daki “Anahtarı test et” ile kontrol et.\nOpenAI’nin mesajı: ' + msg;
+  if (c==='insufficient_quota') return 'OpenAI bakiyen yetersiz. platform.openai.com → Billing bölümünden kredi yükle.';
+  if (/verif/i.test(msg)) return 'GPT Image modelleri için kurum doğrulaması gerekiyor: platform.openai.com → Settings → Organization → General → Verify Organization. Doğrulamadan sonra 15 dakika kadar bekle.';
+  if (c==='moderation_blocked' || /safety system|moderation/i.test(msg)) return 'OpenAI güvenlik filtresi bu isteği reddetti. Promptu biraz değiştirip tekrar dene.';
+  if (code===404 || c==='model_not_found') return 'Model bulunamadı ya da hesabının erişimi yok. Ayarlar’dan başka bir model seç.\n' + msg;
+  if (code===429) return 'OpenAI hız sınırına takıldı (429). Paralel istek sayısını azalt ya da biraz bekle.\n' + msg;
+  return `Hata ${code}: ${msg}`;
+}
+function oaSize(model, iw, ih){
+  let ratio = iw/ih;
+  const a = $('#aspect').value; if (a){ const [w,h] = a.split(':').map(Number); ratio = w/h; }
+  ratio = Math.min(3, Math.max(1/3, ratio));
+  if (!/^gpt-image-2/.test(model)) return ratio > 1.2 ? '1536x1024' : ratio < 1/1.2 ? '1024x1536' : '1024x1024';
+  const L = +$('#oaRes').value || 1536;
+  let w = ratio >= 1 ? L : L*ratio, h = ratio >= 1 ? L/ratio : L;
+  const k = Math.min(1, 3840/Math.max(w,h), 2160/Math.min(w,h)); w *= k; h *= k;
+  const r16 = v => Math.max(256, Math.floor(v/16)*16);
+  return `${r16(w)}x${r16(h)}`;
+}
+async function renderImage(src, refs, prompt, onRetry, extra = {}){
+  const model = modelName(); if (!model) throw new Error('Render modeli seçilmedi.');
+  let base = src.src;
+  const layers = [];
+  if (extra.sketch) layers.push({ url:extra.sketch, alpha:1 });
+  if (extra.maskPaint && provider()!=='openai') layers.push({ url:extra.maskPaint, alpha:.45 });
+  if (layers.length) base = await compositeImg(base, layers);
+  const urls = [base, ...refs.map(r => r.src)];
+  if (provider()==='openai'){
+    let quality = $('#oaQuality').value;
+    if (/^(xhigh|max)$/.test(quality) && !/^gpt-image-2\.5/.test(model)) quality = 'high';
+    const body = { model, prompt, images: urls.map(u => ({ image_url:u })), size: oaSize(model, src.iw, src.ih), quality, n:1, output_format:'png' };
+    if (/^gpt-image-1\.5/.test(model)) body.input_fidelity = 'high';
+    if (extra.mask) body.mask = { image_url: extra.mask };
+    const data = await callOpenAI('images/edits', body, onRetry);
+    const b64 = data?.data?.[0]?.b64_json;
+    if (!b64) throw new Error('OpenAI görüntü döndürmedi.');
+    return { mime:'image/png', b64 };
+  }
+  const gen = { responseModalities:['IMAGE','TEXT'] };
+  if ($('#aspect').value) gen.imageConfig = { aspectRatio: $('#aspect').value };
+  const data = await callGemini(model, {
+    contents:[{ role:'user', parts:[ ...urls.map(u => ({ inlineData:{ mimeType:mimeOf(u), data:b64Of(u) } })), { text:prompt } ] }],
+    generationConfig: gen
+  }, onRetry);
+  return extractGemImage(data);
+}
+
+/* ================= render queue ================= */
+let queue = [], active = 0, qDone = 0, qFail = 0, qTotal = 0;
+function runPrompts(prompts){
+  if (!keyFor(provider())){ openDrawer('settings'); (provider()==='openai' ? oaKeyEl : keyEl).focus(); return toast(`Önce ${provider()==='openai' ? 'OpenAI' : 'Gemini'} API anahtarını gir`); }
+  let made = 0, waiting = 0;
+  for (const p of prompts){
+    const refs = refsOf(p);
+    if (p.type==='edit'){
+      if (!(p.text||'').trim() && !refs.length && !p.mask && !p.sketch && !quickCount(p.q)){ toast(`${p.letter}: ne değişeceğini yaz, bir seçim yap, referans bağla ya da fırçayla boya`); continue; }
+    } else if (!(p.text||'').trim()){ toast(`${p.letter} promptu boş`); continue; }
+    for (const t of (p.type==='edit' ? inputsOf(p) : targetsOf(p))){
+      if (t.type==='result' && !(t.status==='done' && t.src)){ waiting++; continue; }
+      for (let v = 0; v < (p.variants||1); v++){ const r = makeResult(t, p, refs); queue.push(r.id); made++; }
+    }
+  }
+  if (waiting) toast('Henüz bitmemiş renderlar atlandı; bitince tekrar renderla.', 4000);
+  if (!made){ if (!waiting) toast('Renderlanacak bağlı görsel yok'); return; }
+  if (!active && queue.length===made){ qDone = qFail = 0; qTotal = 0; }
+  qTotal += made;
+  renderWires(); scheduleSave(); pump();
+}
+function estH(w, iw, ih){ return 44 + w*(ih||9)/(iw||16) + 52; }
+function makeResult(src, p, refs){
+  if (p.type==='edit') return makeEditResult(src, p, refs);
+  const sibs = B.nodes.filter(n => n.type==='result' && n.imageId===src.id && N(n.promptId)?.type!=='edit');
+  let x, y;
+  if (src.type==='image'){
+    x = sibs.length ? Math.max(...sibs.map(n => n.x + n.w)) + 24 : src.x + src.w + 70; y = src.y;
+  } else if (sibs.length){
+    x = Math.max(...sibs.map(n => n.x + n.w)) + 24; y = sibs[0].y;
+  } else {
+    const pos = freeSpot(src.x, src.y + nodeH(src) + 50, RES_W, estH(RES_W, src.iw, src.ih), src); x = pos.x; y = pos.y;
+  }
+  const num = sibs.filter(n => n.promptId===p.id).length + 1;
+  const r = { id:uid(), type:'result', x, y, w:RES_W, imageId:src.id, promptId:p.id, letter:p.letter, ci:p.ci,
+    num, status:'queue', prompt:composePrompt(p, src, refs), refIds: refs.map(x => x.id), opts:{ ...p.opts }, cat:p.cat, lock:p.lock,
+    iw:src.iw, ih:src.ih, created:Date.now(), src:'', error:'' };
+  B.nodes.push(r); buildNode(r); return r;
+}
+function makeEditResult(src, e, refs){
+  const sibs = B.nodes.filter(n => n.type==='result' && n.promptId===e.id);
+  let x, y;
+  if (sibs.length){ x = Math.max(...sibs.map(n => n.x + n.w)) + 24; y = sibs[0].y; }
+  else { const pos = freeSpot(e.x + e.w + 70, e.y, RES_W, estH(RES_W, src.iw, src.ih), e); x = pos.x; y = pos.y; }
+  const fits = paintFits(e, src);
+  const r = { id:uid(), type:'result', x, y, w:RES_W, imageId:src.id, promptId:e.id, letter:e.letter, ci: src.ci ?? e.ci,
+    num: sibs.filter(n => n.imageId===src.id).length + 1, status:'queue', prompt:composeEdit(e, src, refs), refIds: refs.map(x => x.id),
+    opts:{ ...DEF_OPTS, ...(src.opts||{}) }, cat: src.cat || 'facade', lock: e.lock,
+    mask: fits ? e.mask : null, maskPaint: fits ? e.maskPaint : null, sketch: fits ? e.sketch : null,
+    iw:src.iw, ih:src.ih, created:Date.now(), src:'', error:'' };
+  B.nodes.push(r); buildNode(r); return r;
+}
+function pump(){
+  const max = +$('#conc').value || 2;
+  while (active < max && queue.length){
+    const id = queue.shift(); const r = N(id); if (!r) continue;
+    active++; processResult(r).finally(() => { active--; updateQueueUI(); pump(); });
+  }
+  updateQueueUI();
+}
+async function processResult(r){
+  r.status = 'run'; updateResult(r);
+  try{
+    const img = N(r.imageId); if (!img || !img.src) throw new Error('Kaynak görsel silinmiş ya da hazır değil.');
+    const refs = (r.refIds||[]).map(N).filter(x => x && x.src);
+    const out = await renderImage(img, refs, r.prompt, () => { $('#qText').innerHTML = 'Servis yoğun, tekrar deneniyor…'; }, { mask:r.mask, maskPaint:r.maskPaint, sketch:r.sketch });
+    if (!N(r.id)) return;
+    r.src = `data:${out.mime};base64,${out.b64}`; r.status = 'done'; r.created = Date.now();
+    delete r.mask; delete r.maskPaint; delete r.sketch;
+    await fixAspect(r);
+    qDone++;
+  }catch(e){
+    if (!N(r.id)) return;
+    r.status = 'err'; r.error = e.message; qFail++;
+  }
+  updateResult(r); renderWires(); scheduleSave();
+}
+function fixAspect(r){ return new Promise(res => { const im = new Image(); im.onload = () => { r.iw = im.naturalWidth; r.ih = im.naturalHeight; res(); }; im.onerror = res; im.src = r.src; }); }
+function updateQueueUI(){
+  const busy = active || queue.length;
+  $('#queue').hidden = !busy;
+  if (busy) $('#qText').innerHTML = `Render <b>${qDone+qFail} / ${qTotal}</b>` + (qFail ? ` · ${qFail} hata` : '');
+  $('#runAll').disabled = false;
+}
+$('#stopBtn').onclick = () => {
+  queue.forEach(id => { const r = N(id); if (r){ r.status = 'err'; r.error = 'Durduruldu.'; updateResult(r); } });
+  qTotal -= queue.length; queue = []; updateQueueUI(); scheduleSave();
+  toast('Kuyruk durduruldu; süren istekler tamamlanacak');
+};
+$('#runAll').onclick = () => {
+  const ps = [...B.nodes.filter(n => n.type==='prompt' && targetsOf(n).length), ...B.nodes.filter(n => n.type==='edit' && inputsOf(n).length)];
+  if (!ps.length) return toast('Görsele bağlı prompt ya da düzenleme kartı yok');
+  runPrompts(ps);
+};
+
+/* ================= prompt writer ================= */
+async function writePrompt(p, btn){
+  const idea = (p.idea||'').trim();
+  if (!idea) return toast('Önce ne istediğini Türkçe yaz');
+  btn.disabled = true; btn.textContent = 'Yazılıyor…';
+  try{
+    const isEdit = p.type==='edit';
+    const sysEdit = `You write edit instructions for an AI image-editing model that edits an existing architectural render.
+Rules: Output ONLY the instruction in English, no preamble, no markdown, no quotes. 20-80 words.
+Based on the user's notes (which are in Turkish), state precisely what to change: which element, where in the image, and what it should become (form, material, color, light).
+Do NOT describe the rest of the scene, do NOT add sentences about keeping the camera or the rest of the image unchanged, and do NOT mention masks, sketches or overlays: the app adds all of those automatically.`;
+    const sys = isEdit ? sysEdit : `You write prompts for an AI image-editing model that turns screenshots of 3D models into photorealistic renders. Category: ${CAT_EN[p.cat]}${p.cat==='interior' ? ' (' + (OPTS[0].items.find(i => i[0]===(p.opts||{}).space)||OPTS[0].items[0])[3].replace('Space: ','').replace(/\.$/,'') + ')' : ''}.
+Rules: Output ONLY the prompt text in English, no preamble, no markdown, no quotes. 60-130 words.
+Describe only the core content based on the user's notes (which are in Turkish): materials, colors, surfaces, context and surroundings, and photographic quality.
+Do NOT mention time of day, season, weather, people or rendering style, and do NOT add sentences about keeping the camera, geometry or perspective: the app adds all of those automatically. End with: No text, no watermark.`;
+    let userText = 'User notes (Turkish): ' + idea + ((p.text||'').trim() ? '\n\nCurrent ' + (isEdit ? 'instruction' : 'prompt') + ' for reference (improve or replace it):\n' + p.text.trim() : '');
+    let first = null;
+    if (p.withImg!==false){
+      if (isEdit){
+        const inp = inputsOf(p).find(t => t.src);
+        if (inp && p.preview && paintFits(p, inp) && (p.mask || p.sketch)){ first = { src:p.preview }; userText += '\n\nThe image shows the render with the user\'s markings: semi-transparent red = area to change, colored strokes = rough sketch of what to add.'; }
+        else first = inp || null;
+      } else first = targetsOf(p).find(t => t.src) || null;
+    }
+    let out = '';
+    if ($('#textProvider').value==='openai'){
+      const content = [{ type:'text', text:userText }];
+      if (first) content.unshift({ type:'image_url', image_url:{ url:first.src } });
+      const data = await callOpenAI('chat/completions', { model: $('#oaTextModel').value.trim() || 'gpt-5.4-mini',
+        messages:[{ role:'system', content:sys }, { role:'user', content }] });
+      out = (data?.choices?.[0]?.message?.content || '').trim();
+    } else {
+      const parts = [{ text:userText }];
+      if (first) parts.unshift({ inlineData:{ mimeType:mimeOf(first.src), data:b64Of(first.src) } });
+      const data = await callGemini($('#textModel').value.trim() || 'gemini-2.5-flash', {
+        systemInstruction:{ parts:[{ text:sys }] }, contents:[{ role:'user', parts }], generationConfig:{ temperature:0.7 } });
+      out = (data?.candidates?.[0]?.content?.parts || []).map(x => x.text||'').join('').trim();
+    }
+    if (!out) throw new Error('Metin modeli boş yanıt verdi.');
+    p.text = out; const el = els.get(p.id); if (el) el.querySelector(isEdit ? '.etxt' : '.txt').value = out; updateFull(p);
+    scheduleSave(); toast(`${p.letter} ${isEdit ? 'düzenleme metni' : 'promptu'} yazıldı. İstersen düzenle.`);
+  }catch(e){ toast(e.message, 6000); }
+  btn.disabled = false; btn.textContent = 'Yaz';
+}
+
+/* ================= tidy ================= */
+$('#tidy').onclick = () => {
+  let moved = 0;
+  const kids = src => B.nodes.filter(n => n.type==='result' && n.imageId===src.id && N(n.promptId)?.type!=='edit').sort((a,b) => (a.ci-b.ci) || (a.num-b.num));
+  const row = (list, x, y) => { list.forEach(r => { r.x = x; r.y = y; x += r.w + 24; placeNode(r); moved++; }); };
+  const stack = [];
+  B.nodes.filter(n => n.type==='image').forEach(img => { const rs = kids(img); row(rs, img.x + img.w + 70, img.y); stack.push(...rs); });
+  for (let i = 0; i < stack.length; i++){
+    const r = stack[i], rs = kids(r); if (!rs.length) continue;
+    row(rs, r.x, r.y + nodeH(r) + 50); stack.push(...rs);
+  }
+  B.nodes.filter(n => n.type==='edit').forEach(ed => {
+    const rs = B.nodes.filter(n => n.type==='result' && n.promptId===ed.id).sort((a,b) => a.num-b.num); if (!rs.length) return;
+    const W = rs.reduce((t, r) => t + r.w + 24, -24), H = Math.max(...rs.map(nodeH));
+    const pos = freeSpot(ed.x + ed.w + 70, ed.y, W, H, [ed, ...rs]); row(rs, pos.x, pos.y);
+  });
+  renderWires(); scheduleSave();
+  toast(moved ? 'Renderlar A, B, C sırasıyla kaynaklarının yanına dizildi' : 'Hizalanacak render yok');
+};
+
+/* ================= lightbox ================= */
+let lb = { list:[], i:0, src:false };
+function openLightbox(id){
+  const r = N(id); if (!r) return;
+  lb.list = B.nodes.filter(n => n.type==='result' && n.status==='done' && n.imageId===r.imageId).sort((a,b) => (a.y-b.y) || (a.x-b.x));
+  lb.i = Math.max(0, lb.list.findIndex(n => n.id===id)); lb.src = false;
+  $('#lb').hidden = false; drawLb();
+}
+function drawLb(){
+  const r = lb.list[lb.i]; if (!r) return closeLightbox();
+  const img = N(r.imageId);
+  $('#lbImg').src = lb.src && img ? img.src : r.src;
+  const bd = $('#lbBadge'); bd.textContent = r.letter; bd.style.setProperty('--c', COLORS[(r.ci||0)%COLORS.length]);
+  const p = N(r.promptId);
+  $('#lbTitle').textContent = (lb.src ? 'Kaynak — ' : '') + `${p && p.title ? p.title : (p && p.type==='edit' ? 'Adım ' : 'Alternatif ') + r.letter} · Render ${r.num} · ${img ? nameOf(img) : ''}  (${lb.i+1}/${lb.list.length})`;
+  $('#lbSrc').classList.toggle('on', lb.src);
+  $('#lbPrev').hidden = $('#lbNext').hidden = lb.list.length < 2;
+}
+function lbStep(d){ if (lb.list.length < 2) return; lb.i = (lb.i + d + lb.list.length) % lb.list.length; lb.src = false; drawLb(); }
+function lbToggleSrc(){ lb.src = !lb.src; drawLb(); }
+function closeLightbox(){ $('#lb').hidden = true; }
+$('#lbPrev').onclick = () => lbStep(-1);
+$('#lbNext').onclick = () => lbStep(1);
+$('#lbSrc').onclick = lbToggleSrc;
+$('#lbClose').onclick = closeLightbox;
+$('#lbDl').onclick = () => { const r = lb.list[lb.i]; if (r) downloadResult(r); };
+$('#lb').addEventListener('click', e => { if (e.target.classList.contains('lbimg')) closeLightbox(); });
+
+function downloadResult(r){
+  const base = nameOf(r).replace(/[^\wçğıöşüÇĞİÖŞÜ\-]+/g,'_');
+  const ext = r.src.startsWith('data:image/png') ? 'png' : 'jpg';
+  downloadURL(r.src, `${base}.${ext}`);
+}
+function downloadURL(url, name){ const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
+
+/* ================= toolbar ================= */
+$('#addPrompt').onclick = addPromptAtCenter;
+$('#zIn').onclick = () => zoomAt(innerWidth/2, innerHeight/2, B.view.z*1.2);
+$('#zOut').onclick = () => zoomAt(innerWidth/2, innerHeight/2, B.view.z/1.2);
+$('#zoomLbl').onclick = () => zoomAt(innerWidth/2, innerHeight/2, 1);
+$('#fit').onclick = fitView;
+$('#bname').addEventListener('input', () => { B.name = $('#bname').value || 'Adsız board'; document.title = B.name + ' — Render Optimizasyon'; scheduleSave(); });
+
+function openDrawer(id){ closeDrawers(id); const d = document.getElementById(id); d.hidden = false; if (id==='boards') renderBoardList(); }
+function closeDrawers(except){ ['settings','boards'].forEach(id => { if (id!==except) document.getElementById(id).hidden = true; }); }
+$('#setBtn').onclick = () => { const d = $('#settings'); d.hidden ? openDrawer('settings') : closeDrawers(); };
+$('#boardsBtn').onclick = () => { const d = $('#boards'); d.hidden ? openDrawer('boards') : closeDrawers(); };
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => closeDrawers());
+
+/* ================= saving & boards ================= */
+let saveT = null, dbOK = false;
+function scheduleSave(quiet){
+  clearTimeout(saveT);
+  if (!quiet) $('#saveState').textContent = 'Kaydediliyor…';
+  saveT = setTimeout(() => saveNow(false), quiet ? 1200 : 700);
+}
+async function saveNow(announce){
+  clearTimeout(saveT);
+  B.updated = Date.now();
+  const m = metas.find(x => x.id===B.id);
+  const info = { id:B.id, name:B.name, updated:B.updated, imgs:B.nodes.filter(n=>n.type==='image').length, renders:B.nodes.filter(n=>n.type==='result'&&n.status==='done').length };
+  if (m) Object.assign(m, info); else metas.unshift(info);
+  saveMetas(); LS.set('last', B.id);
+  if (!dbOK){ $('#saveState').textContent = 'Tarayıcı kaydı yok — dışa aktar'; return; }
+  try{
+    await DB.put(JSON.parse(JSON.stringify(B)));
+    $('#saveState').textContent = 'Kaydedildi ' + new Date().toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'});
+    if (announce) toast('Board kaydedildi');
+  }catch(e){
+    $('#saveState').textContent = 'Kaydedilemedi';
+    toast('Tarayıcı kaydı başarısız (depolama dolu olabilir). Dışa aktar ile yedek al.', 6000);
+  }
+}
+function loadBoard(b){
+  queue = []; sel.clear(); selEdge = null;
+  B = b;
+  B.view = B.view || {x:0,y:0,z:1}; B.edges = B.edges || []; B.nodes = B.nodes || [];
+  if (B.letterSeq == null) B.letterSeq = B.nodes.filter(n => n.type==='prompt').length;
+  if (B.editSeq == null) B.editSeq = B.nodes.filter(n => n.type==='edit').length;
+  B.nodes.forEach(n => {
+    if (n.type==='result' && (n.status==='queue' || n.status==='run')){ n.status = 'err'; n.error = 'Render yarıda kaldı.'; }
+    if (n.type==='prompt'){ n.opts = { ...DEF_OPTS, ...(n.opts||{}) }; if (n.lock==null) n.lock = true; }
+  });
+  document.title = B.name + ' — Render Optimizasyon';
+  renderAll(); LS.set('last', B.id);
+}
+function freshBoard(name){
+  B = newBoard(name);
+  loadBoard(B);
+  const p = makePrompt(Math.round(innerWidth*0.12), 110); buildNode(p);
+  renderWires(); saveNow(false);
+}
+function renderBoardList(){
+  const el = $('#blist'); el.innerHTML = '';
+  metas.sort((a,b) => b.updated - a.updated);
+  if (!metas.length){ el.innerHTML = '<div class="hint">Kayıtlı board yok.</div>'; return; }
+  metas.forEach(m => {
+    const it = document.createElement('div'); it.className = 'bitem' + (m.id===B.id ? ' cur' : '');
+    it.innerHTML = `<span class="bn"></span><span class="bd"></span><button class="ib del" type="button" title="Sil">${ICON.x}</button>`;
+    it.querySelector('.bn').textContent = m.name;
+    it.querySelector('.bd').textContent = `${m.imgs||0} görsel · ${m.renders||0} render · ` + new Date(m.updated).toLocaleDateString('tr-TR',{day:'2-digit',month:'short'});
+    it.onclick = async e => {
+      if (e.target.closest('.del') || e.target.closest('.confirm')) return;
+      if (m.id===B.id) return closeDrawers();
+      await saveNow(false);
+      try{ const b = await DB.get(m.id); if (!b) throw 0; loadBoard(b); closeDrawers(); }
+      catch(err){ toast('Board açılamadı'); }
+    };
+    it.querySelector('.del').onclick = () => {
+      it.innerHTML = '<span class="confirm grow">“<span></span>” silinsin mi?</span><button class="sm yes" type="button">Sil</button><button class="sm no" type="button">Vazgeç</button>';
+      it.querySelector('.confirm span').textContent = m.name;
+      it.querySelector('.no').onclick = ev => { ev.stopPropagation(); renderBoardList(); };
+      it.querySelector('.yes').onclick = async ev => {
+        ev.stopPropagation();
+        try{ await DB.del(m.id); }catch(e){}
+        metas = metas.filter(x => x.id!==m.id); saveMetas();
+        if (m.id===B.id){ if (metas[0]){ const b = await DB.get(metas[0].id).catch(()=>null); b ? loadBoard(b) : freshBoard(); } else freshBoard(); }
+        renderBoardList();
+      };
+    };
+    el.appendChild(it);
+  });
+}
+$('#newBoard').onclick = async () => { await saveNow(false); freshBoard('Yeni board'); closeDrawers(); toast('Yeni board açıldı'); setTimeout(() => { $('#bname').focus(); $('#bname').select(); }, 50); };
+$('#exportBtn').onclick = () => {
+  const blob = new Blob([JSON.stringify({ app:'render-optimizasyon', version:1, board:B })], { type:'application/json' });
+  const url = URL.createObjectURL(blob);
+  downloadURL(url, (B.name || 'board').replace(/[^\wçğıöşüÇĞİÖŞÜ\-]+/g,'_') + '.render-board.json');
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+};
+$('#importBtn').onclick = () => $('#importIn').click();
+$('#importIn').onchange = async () => {
+  const f = $('#importIn').files[0]; $('#importIn').value = ''; if (!f) return;
+  try{
+    const obj = JSON.parse(await f.text()); const b = obj.board || obj;
+    if (!Array.isArray(b.nodes)) throw 0;
+    await saveNow(false);
+    b.id = uid(); b.name = (b.name || 'İçe aktarılan') ;
+    loadBoard(b); await saveNow(false); closeDrawers(); fitView(); toast('Board içe aktarıldı');
+  }catch(e){ toast('Bu dosya bir Render Optimizasyon board’u değil'); }
+};
+addEventListener('beforeunload', () => { if (saveT) saveNow(false); });
+
+/* ================= toast ================= */
+let tt;
+function toast(t, ms = 2600){
+  let el = document.querySelector('.toast');
+  if (!el){ el = document.createElement('div'); el.className = 'toast'; el.setAttribute('role','status'); document.body.appendChild(el); }
+  el.textContent = t; el.hidden = false; clearTimeout(tt); tt = setTimeout(() => el.hidden = true, ms);
+}
+
+/* ================= boot ================= */
+(async () => {
+  let framed = false; try{ framed = window.self !== window.top; }catch(e){ framed = true; }
+  if (framed){
+    const w = document.createElement('div'); w.className = 'float';
+    Object.assign(w.style, { top:'72px', left:'50%', transform:'translateX(-50%)', padding:'12px 16px', maxWidth:'560px', zIndex:50, borderColor:'#ff7b72' });
+    w.innerHTML = '<b>Bu sayfa bir önizleme penceresinde açılmış.</b><br><span class="hint">Burada görsel yükleme ve kayıt çalışmayabilir. Dosyayı indir, sonra bilgisayarında çift tıklayarak Chrome veya Edge’de aç.</span>';
+    document.body.appendChild(w);
+  }
+  dbOK = await DB.open();
+  const last = LS.get('last', null);
+  let b = null;
+  if (dbOK && last){ try{ b = await DB.get(last); }catch(e){} }
+  if (!b && dbOK && metas[0]){ try{ b = await DB.get(metas[0].id); }catch(e){} }
+  if (b) loadBoard(b); else freshBoard('İlk board');
+  if (!dbOK) toast('Bu tarayıcıda otomatik kayıt kullanılamıyor; board’u dışa aktararak sakla.', 6000);
+  addEventListener('resize', applyView);
+})();
+})();
+</script>
+</body>
+</html>
